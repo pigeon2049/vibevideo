@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { VideoInput } from './components/VideoInput';
 import axios from 'axios';
-import { Loader2, CheckCircle, Play, FileAudio, Languages } from 'lucide-react';
+import { Loader2, CheckCircle, FileAudio, Languages } from 'lucide-react';
 import { cn } from './lib/utils';
 
 const API_URL = "http://localhost:8000";
@@ -90,7 +90,7 @@ function App() {
         {/* Status Steps */}
         <div className="flex justify-between items-center px-10">
           {['Upload', 'Transcribe', 'Translate', 'Dub'].map((step, idx) => {
-            const stepStatus = ['idle', 'transcribing', 'reviewing', 'finished'];
+
             // Simple visual logic...
             return (
               <div key={step} className="flex flex-col items-center">

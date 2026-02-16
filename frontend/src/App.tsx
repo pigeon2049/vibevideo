@@ -44,18 +44,59 @@ function App() {
   const handleTranslate = async () => {
     setStatus('translating');
     setError(null);
+    setTranslatedSegments([]); // Reset previous translations
+
     try {
-      const response = await axios.post(`${API_URL}/translate`, {
-        segments: segments,
-        target_language: targetLang === 'zh' ? 'Chinese' : 'English' // Simple map for now
+      const response = await fetch(`${API_URL}/translate-stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          segments: segments,
+          target_language: targetLang === 'zh' ? 'Chinese' : 'English'
+        }),
       });
-      setTranslatedSegments(response.data.segments);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader available");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+
+        // Keep the last partial line in the buffer
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.trim()) {
+            try {
+              const chunk = JSON.parse(line);
+              setTranslatedSegments(prev => [...prev, ...chunk]);
+            } catch (e) {
+              console.error("Error parsing chunk:", e);
+            }
+          }
+        }
+      }
+
       setStatus('dubbing');
     } catch (err: any) {
       setError("Translation failed: " + (err.response?.data?.detail || err.message));
       setStatus('reviewing');
     }
   };
+
 
   const handleDub = async () => {
     // Only separate background for now as per backend implementation
@@ -94,9 +135,10 @@ function App() {
             // Simple visual logic...
             return (
               <div key={step} className="flex flex-col items-center">
-                <div className={cn("w-8 h-8 rounded-full flex items-center justify-center border-2",
-                  // Logic to highlight current step
-                  "border-primary"
+                <div className={cn("w-8 h-8 rounded-full flex items-center justify-center border-2 transition-colors",
+                  status === step.toLowerCase() || (status === 'reviewing' && step === 'Transcribe') || (status === 'finished' && step === 'Dub')
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-muted text-muted-foreground"
                 )}>
                   {idx + 1}
                 </div>
@@ -159,41 +201,43 @@ function App() {
           </div>
         )}
 
-        {status === 'translating' && (
-          <div className="flex flex-col items-center justify-center py-20">
-            <Loader2 className="w-12 h-12 animate-spin text-primary mb-4" />
-            <p className="text-lg">Translating Subtitles...</p>
-          </div>
-        )}
-
-        {(status === 'dubbing' && finalVideo === null) && (
+        {(status === 'translating' || (status === 'dubbing' && translatedSegments.length > 0)) && finalVideo === null && (
           <div className="space-y-6">
-            {/* Show translated results */}
             <div className="bg-card border rounded-xl p-6">
-              <h2 className="text-xl font-semibold mb-4">Translation Ready</h2>
-              <div className="max-h-60 overflow-y-auto space-y-2 mb-6 border p-2 rounded">
+              <h2 className="text-xl font-semibold mb-4 flex items-center">
+                <Languages className="mr-2 w-5 h-5" />
+                {status === 'translating' ? "Translating Subtitles..." : "Translation Complete"}
+                {status === 'translating' && <Loader2 className="ml-2 w-4 h-4 animate-spin" />}
+              </h2>
+
+              <div className="max-h-96 overflow-y-auto space-y-2 mb-6 border p-4 rounded bg-slate-50/50">
                 {translatedSegments.map((s, i) => (
-                  <div key={i} className="text-sm grid grid-cols-2 gap-4 border-b pb-1 mb-1">
-                    <p className="text-muted-foreground">{segments[i]?.text}</p>
-                    <p className="font-medium text-blue-600">{s.text}</p>
+                  <div key={i} className="text-sm grid grid-cols-2 gap-4 border-b border-slate-100 pb-2 mb-2 animate-in fade-in slide-in-from-left-2">
+                    <p className="text-muted-foreground italic">{segments[i]?.text}</p>
+                    <p className="font-medium text-blue-700">{s.text}</p>
                   </div>
                 ))}
-              </div>
-              <div className="flex justify-end">
-                <button
-                  onClick={handleDub}
-                  disabled={status === 'dubbing' && error === null} // Wait, I reused status 'dubbing' for both "Review Translation" and "Processing Dub"
-                  className="bg-primary text-primary-foreground px-6 py-2 rounded-lg hover:bg-primary/90 flex items-center"
-                >
-                  {status === 'dubbing' && !translatedSegments.length ? <Loader2 className="animate-spin mr-2" /> : null}
-                  Generate Dubbed Video
-                </button>
-              </div>
-            </div>
 
-            {/* If actually processing dub (I need a sub-state or just use 'dubbing' properly) */}
-            {/* Re-using 'dubbing' state for "Ready to Dub" + "Dubbing in Progress" is confusing. */}
-            {/* Let's fix state: 'reviewing' -> 'translating' -> 'translated' -> 'dubbing' -> 'finished' */}
+                {status === 'translating' && translatedSegments.length < segments.length && (
+                  <div className="flex items-center space-x-2 text-sm text-muted-foreground animate-pulse mt-4">
+                    <div className="w-1.5 h-1.5 bg-primary rounded-full"></div>
+                    <span>Processing next segments...</span>
+                  </div>
+                )}
+              </div>
+
+              {status === 'dubbing' && (
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleDub}
+                    className="bg-primary text-primary-foreground px-6 py-2 rounded-lg hover:bg-primary/90 flex items-center shadow-lg transition-all hover:scale-105"
+                  >
+                    <CheckCircle className="mr-2 w-4 h-4" />
+                    Generate Dubbed Video
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
 

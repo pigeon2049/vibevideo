@@ -101,6 +101,9 @@ async def transcribe_endpoint(request: TranscribeRequest):
         print(f"Transcription error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+from fastapi.responses import StreamingResponse
+import json
+
 @app.post("/translate")
 async def translate_endpoint(request: TranslateRequest):
     try:
@@ -110,6 +113,21 @@ async def translate_endpoint(request: TranslateRequest):
         return {"segments": translated}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/translate-stream")
+async def translate_stream_endpoint(request: TranslateRequest):
+    try:
+        segments_dict = [s.dict() for s in request.segments]
+        
+        def event_generator():
+            for chunk in translator.translate_segments_stream(segments_dict, request.target_language):
+                # Send each chunk as a JSON line
+                yield json.dumps(chunk, ensure_ascii=False) + "\n"
+                
+        return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/dub")
 async def dub_endpoint(request: DubRequest):

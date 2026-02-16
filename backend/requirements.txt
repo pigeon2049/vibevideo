@@ -13,3 +13,4 @@ aiofiles
 torch
 torchvision
 torchaudio
+tenacity

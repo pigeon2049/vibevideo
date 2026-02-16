@@ -1,6 +1,10 @@
 from openai import OpenAI
 import os
 import json
+from dotenv import load_dotenv
+
+dotenv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+load_dotenv(dotenv_path)
 
 # Initialize client (uses OPENAI_API_KEY from env, and OPENAI_BASE_URL if set)
 # Default to OpenAI if not set, but user provided specific configuration.
@@ -8,13 +12,14 @@ base_url = os.environ.get("OPENAI_BASE_URL")
 api_key = os.environ.get("OPENAI_API_KEY")
 model_name = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
-if not api_key:
-    print("Warning: OPENAI_API_KEY not found in environment variables.")
-
-client = OpenAI(
-    base_url=base_url, 
-    api_key=api_key
-)
+client = None
+if api_key:
+    client = OpenAI(
+        base_url=base_url, 
+        api_key=api_key
+    )
+else:
+    print("Warning: OPENAI_API_KEY not found in environment variables. Translation will be disabled.")
 
 def translate_segments(segments, target_language="English"):
     """
@@ -22,7 +27,10 @@ def translate_segments(segments, target_language="English"):
     Expects segments to be a list of dicts with 'text', 'start', 'end'.
     Returns updated list of segments with 'text' translated.
     """
-    
+    if not client:
+        print("Translation skipped: OpenAI client not initialized.")
+        return segments
+
     # Extract just the text to save tokens/make it easier for LLM
     texts = [s['text'] for s in segments]
     
@@ -77,6 +85,10 @@ def translate_segments(segments, target_language="English"):
         return translated_segments
 
     except Exception as e:
-        print(f"Translation error: {e}")
+        error_msg = str(e).lower()
+        if "unauthorized" in error_msg:
+            print(f"Translation error: Unauthorized. Please check your Ollama API key and BASE_URL in .env")
+        else:
+            print(f"Translation error: {e}")
         return segments # Return original on failure
 

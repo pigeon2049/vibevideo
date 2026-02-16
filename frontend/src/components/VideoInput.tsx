@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Upload, Link, Loader2 } from 'lucide-react';
+import { Upload, Link, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import axios from 'axios';
 import { cn } from '../lib/utils';
 
@@ -12,6 +12,8 @@ interface VideoInputProps {
 
 export const VideoInput: React.FC<VideoInputProps> = ({ onVideoSelected }) => {
     const [url, setUrl] = useState('');
+    const [cookies, setCookies] = useState('');
+    const [showCookies, setShowCookies] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<'url' | 'upload'>('url');
@@ -23,7 +25,10 @@ export const VideoInput: React.FC<VideoInputProps> = ({ onVideoSelected }) => {
         setLoading(true);
         setError(null);
         try {
-            const response = await axios.post(`${API_URL}/download`, { url });
+            const response = await axios.post(`${API_URL}/download`, {
+                url,
+                cookies: cookies || undefined
+            });
             onVideoSelected(response.data);
         } catch (err: any) {
             setError(err.response?.data?.detail || "Failed to download video");
@@ -91,6 +96,26 @@ export const VideoInput: React.FC<VideoInputProps> = ({ onVideoSelected }) => {
                             className="w-full p-3 rounded-lg border bg-background focus:ring-2 focus:ring-primary focus:outline-none"
                             required
                         />
+                    </div>
+
+                    <div className="space-y-2">
+                        <button
+                            type="button"
+                            onClick={() => setShowCookies(!showCookies)}
+                            className="text-sm text-muted-foreground hover:text-primary flex items-center transition-colors px-1"
+                        >
+                            {showCookies ? <ChevronUp className="h-4 w-4 mr-1" /> : <ChevronDown className="h-4 w-4 mr-1" />}
+                            Advanced: Use Cookies (for age-restricted videos)
+                        </button>
+
+                        {showCookies && (
+                            <textarea
+                                placeholder="Paste Netscape format cookies here..."
+                                value={cookies}
+                                onChange={(e) => setCookies(e.target.value)}
+                                className="w-full p-3 rounded-lg border bg-background focus:ring-1 focus:ring-primary focus:outline-none text-xs font-mono h-32 resize-none"
+                            />
+                        )}
                     </div>
                     <button
                         type="submit"

@@ -7,6 +7,11 @@ import uvicorn
 import os
 import shutil
 import uuid
+from dotenv import load_dotenv
+
+# Load environment variables before importing services
+dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path)
 
 from services import downloader, transcriber, translator, tts, audio_processor
 from utils.file_manager import TEMP_DIR, OUTPUT_DIR, VIDEO_DIR
@@ -29,6 +34,7 @@ app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 class DownloadRequest(BaseModel):
     url: str
+    cookies: Optional[str] = None
 
 class TranscribeRequest(BaseModel):
     video_path: str
@@ -59,7 +65,7 @@ async def root():
 @app.post("/download")
 async def download_video_endpoint(request: DownloadRequest):
     try:
-        result = downloader.download_video(request.url)
+        result = downloader.download_video(request.url, request.cookies)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

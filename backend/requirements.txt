@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+yt-dlp
+faster-whisper
+edge-tts
+# moviepy often has issues, let's stick to direct ffmpeg-python or subprocess calls for stability if possible, but moviepy is easier for simple cutting.
+moviepy
+ffmpeg-python
+openai
+python-dotenv
+requests
+aiofiles
+torch
+torchvision
+torchaudio

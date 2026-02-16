@@ -70,62 +70,76 @@ def translate_segments_stream(segments, target_language="English", chunk_size=5)
         system_prompt = f"""You are a professional subtitle translator. 
         Translate the following list of subtitle lines to {target_language}.
         Maintain the tone and context. 
-        Return ONLY a JSON array of strings, matching the input array length exactly.
+        Return ONLY a JSON array of strings, matching the input array length exactly ({len(texts)} strings).
+        Example format: ["translated line 1", "translated line 2", ...]
         Do not include any other text or markdown formatting.
         """
         
         user_prompt = json.dumps(texts, ensure_ascii=False)
         
-        try:
-            content = fetch_translation_with_retry(system_prompt, user_prompt)
-            
-            # Basic cleaning of the response if it's wrapped in markdown
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-                
+        # Internal retry for validation errors (JSON or count mismatch)
+        max_validation_retries = 3
+        translated_chunk = None
+        
+        for attempt in range(max_validation_retries):
             try:
-                translated_texts = json.loads(content)
-            except json.JSONDecodeError as je:
-                print(f"JSON Decode Error for chunk {i}: {je}. Content: {content[:100]}...")
-                yield chunk
-                continue
-            
-            # Handle cases where the model returns a wrapper object
-            if isinstance(translated_texts, dict):
-                found_list = False
-                for key, value in translated_texts.items():
-                    if isinstance(value, list):
-                        translated_texts = value
-                        found_list = True
-                        break
-                if not found_list:
-                    print(f"Warning: Could not find translation list in dict for chunk {i}")
-                    yield chunk
+                content = fetch_translation_with_retry(system_prompt, user_prompt)
+                
+                # Basic cleaning of the response if it's wrapped in markdown
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    content = content.split("```")[1].split("```")[0].strip()
+                
+                # Attempt to parse JSON
+                try:
+                    translated_texts = json.loads(content)
+                except json.JSONDecodeError as je:
+                    print(f"JSON Decode Error for chunk {i} (Attempt {attempt + 1}): {je}. Retrying...")
                     continue
-            
-            if not isinstance(translated_texts, list):
-                print(f"Warning: Expected list but got {type(translated_texts)} for chunk {i}")
-                yield chunk
-                continue
+                
+                # Handle cases where the model returns a wrapper object
+                if isinstance(translated_texts, dict):
+                    found_list = False
+                    for key, value in translated_texts.items():
+                        if isinstance(value, list):
+                            translated_texts = value
+                            found_list = True
+                            break
+                    if not found_list:
+                        print(f"Error: Could not find translation list in dict for chunk {i} (Attempt {attempt + 1}). Retrying...")
+                        continue
+                
+                if not isinstance(translated_texts, list):
+                    print(f"Error: Expected list but got {type(translated_texts)} for chunk {i} (Attempt {attempt + 1}). Retrying...")
+                    continue
 
-            if len(translated_texts) != len(chunk):
-                print(f"Warning: Mismatch in translation count for chunk {i}. Input: {len(chunk)}, Output: {len(translated_texts)}")
-            
-            translated_chunk = []
-            for j, segment in enumerate(chunk):
-                translated_text = translated_texts[j] if j < len(translated_texts) else segment['text']
-                translated_chunk.append({
-                    "start": segment["start"],
-                    "end": segment["end"],
-                    "text": translated_text
-                })
-            
+                if len(translated_texts) != len(chunk):
+                    print(f"Error: Count mismatch for chunk {i} (Attempt {attempt + 1}). Input: {len(chunk)}, Output: {len(translated_texts)}. Retrying...")
+                    continue
+                
+                # If we got here, validation passed
+                translated_chunk = []
+                for j, segment in enumerate(chunk):
+                    translated_chunk.append({
+                        "start": segment["start"],
+                        "end": segment["end"],
+                        "text": translated_texts[j]
+                    })
+                break # Success! Break the retry loop
+                
+            except Exception as e:
+                print(f"Translation call failed for chunk {i} (Attempt {attempt + 1}): {e}")
+                if attempt == max_validation_retries - 1:
+                    break # Last attempt failed
+        
+        if translated_chunk:
             yield translated_chunk
-
-        except Exception as e:
-            print(f"Translation chunk {i} failed after retries: {e}")
-            yield chunk # Return original chunk on failure
-
-
+        else:
+            print(f"Warning: Chunk {i} failed all {max_validation_retries} validation attempts. Using original text.")
+            # Yield original chunk with original text
+            yield [{
+                "start": s["start"],
+                "end": s["end"],
+                "text": s["text"]
+            } for s in chunk]

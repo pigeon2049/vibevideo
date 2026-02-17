@@ -1,14 +1,14 @@
 import os
+import sys
 
-# 之前尝试开启镜像，根据您的要求已禁用
-# os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-# print(f"已启用镜像加速: {os.environ['HF_ENDPOINT']}")
-print("已禁用镜像加速，使用默认源下载...")
+# 启用镜像加速
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+print(f"已启用镜像加速: {os.environ['HF_ENDPOINT']}")
 
 from faster_whisper import download_model
 
-model_size = "small"
-# 将模型保存在当前目录下的 models/small 文件夹中
+# 默认下载 large-v3，除非通过命令行指定
+model_size = sys.argv[1] if len(sys.argv) > 1 else "large-v3"
 output_dir = "models"
 full_output_path = os.path.join(os.getcwd(), output_dir, model_size)
 
@@ -28,4 +28,4 @@ try:
     
 except Exception as e:
     print(f"\n❌ 下载失败: {e}")
-    print("请检查网络连接。如果镜像无法访问，请尝试修改脚本注释掉 HF_ENDPOINT 设置。")
+    print("请检查网络连接。当前已尝试使用 hf-mirror.com 镜像。")

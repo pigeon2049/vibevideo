@@ -1,24 +1,37 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import List, Optional
-import uvicorn
 import os
 import shutil
 import uuid
+import json
+import asyncio
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import uvicorn
+from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 
-# Load environment variables before importing services
+# 1. 环境初始化
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 
-from services import downloader, transcriber, translator, tts, audio_processor
+# 2. 业务组件导入
+from services import downloader, translator, tts, audio_processor
+from services.transcriber import router as transcriber_router
 from utils.file_manager import TEMP_DIR, OUTPUT_DIR, VIDEO_DIR
+from db.database import engine, Base, get_db
+from db.models import Project, Segment
 
-app = FastAPI(title="Vibe Video API")
+# 自动创建所有表
+Base.metadata.create_all(bind=engine)
 
-# Configure CORS
+app = FastAPI(title="Vibe Video API - Full Async Version")
+
+# ==================================================
+# 中间件配置 (必须置于路由注册之前)
+# ==================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,160 +40,315 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files to serve generated videos
-app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
+# 挂载业务路由
+app.include_router(transcriber_router)
 
-# --- Pydantic Models ---
+# 静态目录挂载 (用于访问生成的音视频)
+app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
+app.mount("/temp", StaticFiles(directory=TEMP_DIR), name="temp")
+
+# ==================================================
+# 数据模型定义
+# ==================================================
 
 class DownloadRequest(BaseModel):
     url: str
     cookies: Optional[str] = None
 
-class TranscribeRequest(BaseModel):
-    video_path: str
-    language: Optional[str] = None
-
-class Segment(BaseModel):
+class SegmentModel(BaseModel):
+    id: str
     start: float
     end: float
     text: str
     audio_file: Optional[str] = None
 
 class TranslateRequest(BaseModel):
-    segments: List[Segment]
+    project_id: str
     target_language: str
+    context: Optional[List[str]] = []
 
 class DubRequest(BaseModel):
-    video_path: str
-    segments: List[Segment]
+    project_id: str
     voice: str
     background_volume: float = 0.1
 
-# --- Endpoints ---
+# ==================================================
+# API 端点
+# ==================================================
 
 @app.get("/")
 async def root():
-    return {"message": "Vibe Video API is running"}
+    return {"status": "online", "service": "Vibe Video API", "version": "2.5.0"}
 
+# --- 获取项目状态 ---
+@app.get("/project/{project_id}")
+async def get_project(project_id: str, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # 格式化 segments 返回
+    segments = [
+        {
+            "id": s.id,
+            "start": s.start_time,
+            "end": s.end_time,
+            "text": s.text_original,
+            "text_translated": s.text_translated,
+        }
+        for s in project.segments
+    ]
+    
+    return {
+        "id": project.id,
+        "video_path": project.video_path,
+        "status": project.status,
+        "target_language": project.target_language,
+        "segments": segments
+    }
+
+# --- 视频下载 ---
 @app.post("/download")
-async def download_video_endpoint(request: DownloadRequest):
+async def download_video_endpoint(request: DownloadRequest, db: Session = Depends(get_db)):
     try:
+        print(f"📥 Received download task: {request.url}")
+        # 该操作通常涉及长时间 IO，建议确保 downloader 内部无阻塞或运行在执行器中
         result = downloader.download_video(request.url, request.cookies)
+        
+        # 创建数据库记录
+        new_project = Project(
+            video_path=result.get("path"),
+            status="transcribing"
+        )
+        db.add(new_project)
+        db.commit()
+        db.refresh(new_project)
+        
+        result["project_id"] = new_project.id
         return result
     except Exception as e:
+        print(f"❌ Download Failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- 本地上传 ---
 @app.post("/upload")
-async def upload_video_endpoint(file: UploadFile = File(...)):
+async def upload_video_endpoint(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
-        filename = f"{uuid.uuid4()}_{file.filename}"
+        ext = os.path.splitext(file.filename)[1]
+        filename = f"{uuid.uuid4()}{ext}"
         file_path = os.path.join(VIDEO_DIR, filename)
-        
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        return {
-            "title": file.filename,
-            "path": file_path,
-            "original_url": None
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/transcribe")
-async def transcribe_endpoint(request: TranscribeRequest):
-    try:
-        if not os.path.exists(request.video_path):
-            raise HTTPException(status_code=404, detail="Video file not found")
+        # 创建数据库记录
+        new_project = Project(
+            video_path=file_path,
+            status="transcribing"
+        )
+        db.add(new_project)
+        db.commit()
+        db.refresh(new_project)
         
-        # Extract audio first for faster transcription? 
-        # Whisper can handle video directly (via ffmpeg), but let's just pass path.
-        segments = transcriber.transcribe_audio(request.video_path, request.language)
-        return {"segments": segments}
-    except Exception as e:
-        print(f"Transcription error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-from fastapi.responses import StreamingResponse
-import json
-
-@app.post("/translate")
-async def translate_endpoint(request: TranslateRequest):
-    try:
-        # Pydantic model to dict
-        segments_dict = [s.dict() for s in request.segments]
-        translated = translator.translate_segments(segments_dict, request.target_language)
-        return {"segments": translated}
+        return {"title": file.filename, "path": file_path, "project_id": new_project.id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- 流式翻译 (解决 Pending 核心) ---
 @app.post("/translate-stream")
-async def translate_stream_endpoint(request: TranslateRequest):
+async def translate_stream_endpoint(request: TranslateRequest, db: Session = Depends(get_db)):
+    """
+    接收翻译请求，通过 NDJSON 流式返回结果。
+    内部读取数据库中未翻译的片段。
+    """
+    print(f"📡 API HIT: /translate-stream | Project: {request.project_id}")
+    
     try:
-        segments_dict = [s.dict() for s in request.segments]
+        project = db.query(Project).filter(Project.id == request.project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        # 提取未翻译的片段，每次最多处理 20 个（可配置）
+        segments_to_translate = db.query(Segment).filter(
+            Segment.project_id == request.project_id,
+            Segment.text_translated == None
+        ).order_by(Segment.start_time).limit(20).all()
         
-        def event_generator():
-            for chunk in translator.translate_segments_stream(segments_dict, request.target_language):
-                # Send each chunk as a JSON line
-                yield json.dumps(chunk, ensure_ascii=False) + "\n"
+        if not segments_to_translate:
+            return StreamingResponse(iter([])) # 返回空流
+            
+        # 构建 segments_data 供翻译服务使用
+        segments_data = [
+            {"id": s.id, "start": s.start_time, "end": s.end_time, "text": s.text_original}
+            for s in segments_to_translate
+        ]
+        
+        # 更新项目状态
+        project.status = "translating"
+        project.target_language = request.target_language
+        db.commit()
+        
+        async def event_generator():
+            # 需要在生成器内新建 DB Session，因为 FastAPI 的 Depends 在生成器中可能失效
+            # 或者传递已有的 DB 并在每次 yield 前 commit
+            from db.database import SessionLocal
+            stream_db = SessionLocal()
+            try:
+                loop = asyncio.get_event_loop()
                 
-        return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+                gen = translator.translate_segments_stream(
+                    segments=segments_data,
+                    target_language=request.target_language,
+                    history_context=request.context or []
+                )
+
+                def get_next_chunk():
+                    try:
+                        return next(gen)
+                    except StopIteration:
+                        return None
+
+                while True:
+                    chunk = await loop.run_in_executor(None, get_next_chunk)
+                    
+                    if chunk is None:
+                        break
+                        
+                    # 及时更新数据库中的翻译结果
+                    for translated_seg in chunk:
+                        db_segment = stream_db.query(Segment).filter(Segment.id == translated_seg["id"]).first()
+                        if db_segment and "text" in translated_seg:
+                            db_segment.text_translated = translated_seg["text"]
+                    stream_db.commit()
+                        
+                    yield json.dumps(chunk, ensure_ascii=False) + "\n"
+                    await asyncio.sleep(0.01)
+                    
+                # 检查是否全部已翻译
+                untranslated_count = stream_db.query(Segment).filter(
+                    Segment.project_id == request.project_id,
+                    Segment.text_translated == None
+                ).count()
+                
+                if untranslated_count == 0:
+                    proj = stream_db.query(Project).filter(Project.id == request.project_id).first()
+                    if proj:
+                        proj.status = "translated"
+                        stream_db.commit()
+
+            finally:
+                stream_db.close()
+
+        return StreamingResponse(
+            event_generator(), 
+            media_type="application/x-ndjson",
+            headers={
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            }
+        )
     except Exception as e:
+        print(f"❌ Endpoint Fatal Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+# --- 重置片段翻译 ---
+@app.post("/project/{project_id}/segment/{segment_id}/reset")
+async def reset_segment_translation(project_id: str, segment_id: str, mode: str = "single", db: Session = Depends(get_db)):
+    segment = db.query(Segment).filter(Segment.project_id == project_id, Segment.id == segment_id).first()
+    if not segment:
+        raise HTTPException(status_code=404, detail="Segment not found")
+        
+    start_time = segment.start_time
+    
+    if mode == "all_after":
+        # Reset this segment and all subsequent segments
+        segments_to_reset = db.query(Segment).filter(
+            Segment.project_id == project_id,
+            Segment.start_time >= start_time
+        ).all()
+        for s in segments_to_reset:
+            s.text_translated = None
+    else:
+        # Reset just this one
+        segment.text_translated = None
+    
+    # 确保项目的状态允许重新翻译
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if project and project.status == "translated":
+        project.status = "reviewing"
+        
+    db.commit()
+    return {"status": "success"}
 
-
+# --- 配音合成 ---
 @app.post("/dub")
-async def dub_endpoint(request: DubRequest):
+async def dub_endpoint(request: DubRequest, db: Session = Depends(get_db)):
     try:
-        # 1. Generate Speech
-        segments_dict = [s.dict() for s in request.segments]
-        segments_with_audio = await tts.generate_speech_for_segments(segments_dict, request.voice)
+        project = db.query(Project).filter(Project.id == request.project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        project.status = "dubbing"
+        db.commit()
         
-        # 2. Concatenate speech segments into one track (complex, easier to use ffmpeg filter or moviepy)
-        # For simplicity MVP: process each segment? No, we need a single audio track synced.
-        # Let's create a silence-padded audio track.
+        # 获取所有片段（并转换为原来的字典格式以适应 tts）
+        all_segments = project.segments
+        segments_dict = [
+            {
+                "id": s.id,
+                "start": s.start_time,
+                "end": s.end_time,
+                "text": s.text_translated or s.text_original
+            }
+            for s in all_segments if s.text_translated
+        ]
         
-        # Actually, let's implement a simple "stitcher" here or in audio_processor
-        # For MVP, let's use a simplified approach:
-        # We will create a full length audio file.
+        print(f"🎬 Step 1: Starting TTS for {len(segments_dict)} segments...")
+        segments_with_audio = await tts.generate_speech_for_segments(
+            segments_dict,
+            request.voice
+        )
         
-        # Isolate original audio and separate vocals
-        print("Isolating original audio...")
-        original_audio = audio_processor.isolate_audio(request.video_path)
-        
-        print("Separating vocals...")
+        # 将生成的音频路径更新回 DB
+        for s_audio in segments_with_audio:
+            if "audio_file" in s_audio:
+                db_seg = db.query(Segment).filter(Segment.id == s_audio["id"]).first()
+                if db_seg:
+                    db_seg.tts_audio_path = s_audio["audio_file"]
+        db.commit()
+
+        print("🔍 Step 2: Isolating and separating audio layers...")
+        original_audio = audio_processor.isolate_audio(project.video_path)
         separated = audio_processor.separate_vocals(original_audio)
-        background_audio = separated["background"]
         
-        # Generate full TTS track
-        # This is tricky without exact timing. Text length != Audio length.
-        # We might need to speed up/slow down audio to fit the segment duration.
-        # For this MVP, we will just place the audio at the start time.
+        print("🛠 Step 3: Merging final high-fidelity video...")
+        final_video_path = audio_processor.merge_audio_video(
+            video_path=project.video_path,
+            background_audio=separated["background"],
+            tts_segments=segments_with_audio,
+            bg_volume=request.background_volume
+        )
         
-        # TODO: Ideally should be in audio_processor. 
-        # But let's build the ffmpeg command here or add a specific function in audio_processor.
-        
-        # Let's add a function "create_dub_track" in audio_processor that takes segments with audio files
-        # and creates a single mixed wav file.
-        
-        # For now, let's assume we implement `audio_processor.create_dub_track`
-        # I'll update audio_processor next to support this.
-        
-        # Placeholder: Return error for now as we need that function.
-        # Or better: I will implement `audio_processor.mix_segments` in a separate step or right now.
-        
-        # Use a temporary implementation for now:
-        # Just return the background audio as "dubbed" to test flow.
-        final_video = audio_processor.merge_audio_video(request.video_path, background_audio)
-        
+        project.status = "finished"
+        db.commit()
+
         return {
-            "video_path": final_video, 
-            "url": f"/output/{os.path.basename(final_video)}"
+            "video_path": final_video_path,
+            "url": f"/output/{os.path.basename(final_video_path)}"
         }
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Dubbing failed: {str(e)}")
+
+# ==================================================
+# 启动入口
+# ==================================================
 
 if __name__ == "__main__":
+    # 自动初始化工作目录
+    for d in [TEMP_DIR, OUTPUT_DIR, VIDEO_DIR]:
+        if not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
+        
+    print("🔥 Vibe Video Backend is firing up on http://localhost:8000")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

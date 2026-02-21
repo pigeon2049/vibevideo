@@ -1,200 +1,143 @@
-from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 import os
 import json
+import re
+import time
+from typing import List, Dict, Generator
+from openai import OpenAI  # 新版导入方式
 from dotenv import load_dotenv
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-dotenv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-load_dotenv(dotenv_path)
+load_dotenv()
 
-# Initialize client
-base_url = os.environ.get("OPENAI_BASE_URL")
-api_key = os.environ.get("OPENAI_API_KEY")
-model_name = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+# 优先级：.env里的OPENAI_API_BASE > .env里的OPENAI_BASE_URL > 默认官方地址
+base_url = os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL") or "http://localhost:11434/v1"
+api_key = os.getenv("OPENAI_API_KEY", "ollama")
 
-client = None
-if api_key:
-    client = OpenAI(
-        base_url=base_url, 
-        api_key=api_key
-    )
-else:
-    print("Warning: OPENAI_API_KEY not found in environment variables. Translation will be disabled.")
+print(f"📡 Current LLM Config - URL: {base_url}, Model: {os.getenv('LLM_MODEL')}")
 
-@retry(
-    stop=stop_after_attempt(2),
-    wait=wait_exponential(multiplier=2, min=5, max=20),
-    retry=retry_if_exception_type((APITimeoutError, APIConnectionError, RateLimitError)),
-    reraise=True
+client = OpenAI(
+    api_key=api_key,
+    base_url=base_url
 )
-def fetch_translation_with_retry(system_prompt, user_prompt):
-    """
-    Fetches translation from OpenAI API with retry logic.
-    """
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        response_format={"type": "json_object"} if "gpt" in model_name or "json" in model_name else None,
-        timeout=300.0 # 300 seconds timeout for large chunks and slow models
+
+class Translator:
+    def __init__(self):
+        self.model = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
+
+    def _build_prompt(self, target_lang: str, context_text: str, current_segments: List[Dict]) -> str:
+        segments_json = json.dumps(current_segments, ensure_ascii=False)
+        return f"""You are a professional video subtitle translator. 
+Target Language: {target_lang}
+
+Context for reference (previous translated sentences):
+{context_text}
+
+Task: Translate the following subtitle segments into {target_lang}.
+Requirements:
+1. Maintain the exact same JSON structure.
+2. Only translate the "text" field.
+3. Return ONLY the JSON list of translated segments.
+
+Segments to translate:
+{segments_json}
+"""
+
+    def translate_segments_stream(
+        self, 
+        segments: List[Dict], 
+        target_language: str, 
+        history_context: List[str] = [], 
+        chunk_size: int = 5
+    ) -> Generator[List[Dict], None, None]:
+        
+        context_buffer = history_context.copy()
+        total_chunks = (len(segments) + chunk_size - 1) // chunk_size
+        
+        print(f"🚀 Starting translation: {len(segments)} segments, {total_chunks} chunks.")
+
+        for i in range(0, len(segments), chunk_size):
+            chunk_idx = i // chunk_size + 1
+            chunk = segments[i : i + chunk_size]
+            context_text = " ".join(context_buffer[-8:])
+            
+            print(f"📡 Sending Chunk {chunk_idx}/{total_chunks} to LLM...")
+            
+            retry_count = 0
+            while True:
+                start_time = time.time()
+                try:
+                    # 新版 OpenAI 语法
+                    response = client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": "You are a specialized translator. Output valid JSON array ONLY."},
+                            {"role": "user", "content": self._build_prompt(target_language, context_text, chunk)}
+                        ],
+                        temperature=0.3,
+                        timeout=180  # 修改为 3 分钟 (180秒)
+                    )
+
+                    duration = time.time() - start_time
+                    content = response.choices[0].message.content.strip()
+                    print(f"✅ Received Chunk {chunk_idx} from LLM ({duration:.2f}s)")
+
+                    # 健壮的 JSON 提取逻辑
+                    translated_chunk = []
+                    try:
+                        clean_content = re.sub(r'```json\s*|```', '', content).strip()
+                        raw_data = json.loads(clean_content)
+                        if isinstance(raw_data, list):
+                            translated_chunk = raw_data
+                        elif isinstance(raw_data, dict):
+                            for val in raw_data.values():
+                                if isinstance(val, list):
+                                    translated_chunk = val
+                                    break
+                    except Exception as json_err:
+                        print(f"⚠️ JSON Parse Error: {json_err}. Retrying...")
+                        time.sleep(2)
+                        continue
+
+                    if not translated_chunk or len(translated_chunk) != len(chunk):
+                        expected = len(chunk)
+                        actual = len(translated_chunk) if translated_chunk else 0
+                        print(f"⚠️ Count mismatch! Expected {expected}, got {actual}. Retrying...")
+                        time.sleep(2)
+                        continue
+
+                    # 防复读机逻辑：如果所有句子的翻译和原句完全一样，说明模型偷懒了
+                    parrot_count = sum(1 for og, tr in zip(chunk, translated_chunk) if og['text'].strip() == str(tr.get('text', '')).strip())
+                    if parrot_count == len(chunk) and len(chunk) > 0:
+                        print(f"⚠️ LLM parroted the original text without translation. Retrying...")
+                        time.sleep(2)
+                        continue
+
+                    # 防胡言乱语逻辑：如果目标是中文，结果必须包含中文字符
+                    if target_language in ['Chinese', 'zh']:
+                        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in content)
+                        if not has_chinese:
+                            print(f"⚠️ No Chinese characters found in output. Retrying...")
+                            time.sleep(2)
+                            continue
+
+                    for seg in translated_chunk:
+                        context_buffer.append(seg.get('text', ''))
+
+                    yield translated_chunk
+                    break # 成功则退出重试循环
+
+                except Exception as e:
+                    retry_count += 1
+                    print(f"❌ Connection/LLM Error at chunk {chunk_idx}: {str(e)}. Retrying... (Attempt {retry_count})")
+                    time.sleep(3) 
+
+        print("🏁 Translation stream finished.")
+
+_translator = Translator()
+
+# 这里确保参数名与 main.py 的调用匹配
+def translate_segments_stream(segments: List[Dict], target_language: str, history_context: List[str] = []):
+    return _translator.translate_segments_stream(
+        segments=segments, 
+        target_language=target_language, 
+        history_context=history_context
     )
-    return response.choices[0].message.content
-
-def translate_segments(segments, target_language="English"):
-    """
-    Sync wrapper for translate_segments_stream
-    """
-    translated = []
-    for chunk in translate_segments_stream(segments, target_language):
-        translated.extend(chunk)
-    return translated
-
-def _translate_batch(chunk, target_language, attempt_limit=20):
-    """
-    Translates a small batch of segments with indexing and validation.
-    """
-    texts_with_ids = [{"id": i, "text": s['text']} for i, s in enumerate(chunk)]
-    
-    system_prompt = f"""You are a professional subtitle translator. 
-    Translate the following JSON array of subtitle lines to {target_language}.
-    Maintain the tone and context.
-    
-    You MUST return a JSON array of objects with the same IDs and the translated text.
-    Format: [{{"id": 0, "trans": "translated text 0"}}, {{"id": 1, "trans": "translated text 1"}}, ...]
-    
-    Rules:
-    1. Respond ONLY with the JSON array.
-    2. Ensure EVERY ID from the input is present in the output.
-    3. The length of the output array MUST exactly match the input array length ({len(chunk)}).
-    """
-    
-    user_prompt = json.dumps(texts_with_ids, ensure_ascii=False)
-    
-    for attempt in range(attempt_limit):
-        try:
-            content = fetch_translation_with_retry(system_prompt, user_prompt)
-            
-            # Basic cleaning
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-            
-            # Parse JSON
-            try:
-                translated_data = json.loads(content)
-            except json.JSONDecodeError as je:
-                print(f"JSON Decode Error (Attempt {attempt + 1}/{attempt_limit}): {je}. Retrying...")
-                continue
-            
-            # Handle list/dict wrapping
-            if isinstance(translated_data, dict):
-                for val in translated_data.values():
-                    if isinstance(val, list):
-                        translated_data = val
-                        break
-            
-            if not isinstance(translated_data, list):
-                print(f"Validation Error: Expected list, got {type(translated_data)} (Attempt {attempt + 1}). Retrying...")
-                continue
-
-            # Check for IDs and length
-            if len(translated_data) != len(chunk):
-                print(f"Validation Error: Count mismatch. Input: {len(chunk)}, Output: {len(translated_data)} (Attempt {attempt + 1}). Retrying...")
-                continue
-            
-            # Create a map for easy lookup and verify IDs
-            trans_map = {}
-            valid = True
-            for item in translated_data:
-                if not isinstance(item, dict) or "id" not in item or "trans" not in item:
-                    valid = False
-                    break
-                # Rigorous check: trans should not be empty or whitespace only
-                trans_text = item.get("trans", "")
-                if not isinstance(trans_text, str) or not trans_text.strip():
-                    print(f"Validation Error: Empty translation found for ID {item.get('id')} (Attempt {attempt + 1}). Retrying...")
-                    valid = False
-                    break
-                trans_map[item["id"]] = trans_text
-            
-            if not valid:
-                print(f"Validation Error: Item format invalid (Attempt {attempt + 1}). Retrying...")
-                continue
-                
-            # Verify all indices exist
-            results = []
-            for i in range(len(chunk)):
-                if i not in trans_map:
-                    valid = False
-                    break
-                results.append({
-                    "start": chunk[i]["start"],
-                    "end": chunk[i]["end"],
-                    "text": trans_map[i]
-                })
-            
-            if not valid:
-                print(f"Validation Error: Missing IDs in response (Attempt {attempt + 1}). Retrying...")
-                continue
-                
-            return results # Success!
-
-        except Exception as e:
-            print(f"Translation batch call failed (Attempt {attempt + 1}): {e}")
-            
-    return None # Failed all attempts
-
-def _translate_recursive(segments, target_language):
-    """
-    Tries to translate segments. If fails, splits into smaller chunks.
-    20 -> 5 -> 1 -> Fallback
-    """
-    if not segments:
-        return []
-
-    # Attempt current batch
-    translated = _translate_batch(segments, target_language)
-    if translated:
-        return translated
-    
-    # If failed and can be split
-    if len(segments) > 5:
-        print(f"Chunk of {len(segments)} failed. Splitting into chunks of 5...")
-        new_results = []
-        for i in range(0, len(segments), 5):
-            sub_chunk = segments[i:i + 5]
-            new_results.extend(_translate_recursive(sub_chunk, target_language))
-        return new_results
-    
-    if len(segments) > 1:
-        print(f"Chunk of {len(segments)} failed. Splitting into individual lines...")
-        new_results = []
-        for segment in segments:
-            new_results.extend(_translate_recursive([segment], target_language))
-        return new_results
-    
-    # Final fallback for single line
-    print(f"Warning: Failed to translate single line after all retries. Falling back to original.")
-    return [{
-        "start": segments[0]["start"],
-        "end": segments[0]["end"],
-        "text": segments[0]["text"]
-    }]
-
-def translate_segments_stream(segments, target_language="English", chunk_size=5):
-    """
-    Translates a list of segments to target language in chunks.
-    Yields translated chunks one by one.
-    """
-    if not client:
-        print("Translation skipped: OpenAI client not initialized.")
-        yield segments
-        return
-
-    for i in range(0, len(segments), chunk_size):
-        chunk = segments[i:i + chunk_size]
-        translated_chunk = _translate_recursive(chunk, target_language)
-        yield translated_chunk

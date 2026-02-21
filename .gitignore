@@ -40,3 +40,8 @@ Thumbs.db
 
 # Models at root
 models/
+
+# Database files
+backend/data/
+*.sqlite
+*.sqlite3

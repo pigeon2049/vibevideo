@@ -1,280 +1,254 @@
-import { useState } from 'react';
-import { VideoInput } from './components/VideoInput';
-import axios from 'axios';
-import { Loader2, CheckCircle, FileAudio, Languages } from 'lucide-react';
-import { cn } from './lib/utils';
+import { useState, useEffect, useRef } from 'react'
+import axios from 'axios'
+import { VideoInput } from './components/VideoInput'
+import { Header } from './components/Header'
+import { DubbingStep } from './components/DubbingStep'
+import { FinishedPlayer } from './components/FinishedPlayer'
+import { TranslationWorkspace } from './components/TranslationWorkspace'
+import type { Status, Segment } from './types'
 
-const API_URL = "http://localhost:8000";
-
-type Status = 'idle' | 'downloading' | 'transcribing' | 'reviewing' | 'translating' | 'dubbing' | 'finished';
-
-interface Segment {
-  start: number;
-  end: number;
-  text: string;
-}
+const API_URL = "http://localhost:8000"
 
 function App() {
-  const [status, setStatus] = useState<Status>('idle');
-  const [videoData, setVideoData] = useState<any>(null);
-  const [segments, setSegments] = useState<Segment[]>([]);
-  const [translatedSegments, setTranslatedSegments] = useState<Segment[]>([]);
-  const [targetLang, setTargetLang] = useState('zh'); // Default Chinese
-  const [finalVideo, setFinalVideo] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<Status>('idle')
+  const [projectId, setProjectId] = useState<string | null>(null)
+  const [segments, setSegments] = useState<Segment[]>([])
+  const [translatedSegments, setTranslatedSegments] = useState<Segment[]>([])
+  const [targetLang, setTargetLang] = useState('zh')
+  const [finalVideo, setFinalVideo] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
-  const handleVideoSelected = async (data: any) => {
-    setVideoData(data);
-    setStatus('transcribing');
-    setError(null);
+  // 队列控制 Refs
+  const isProcessingRef = useRef<boolean>(false)
 
-    // Auto-start transcription
+  // ==================================================
+  // 核心：翻译队列逻辑
+  // ==================================================
+
+  useEffect(() => {
+    // 页面加载时恢复上次的 Project
+    const savedProjectId = localStorage.getItem('vibe_project_id');
+    if (savedProjectId && status === 'idle') {
+      restoreProject(savedProjectId);
+    }
+  }, []);
+
+  const restoreProject = async (id: string) => {
     try {
-      const response = await axios.post(`${API_URL}/transcribe`, {
-        video_path: data.path
-      });
-      setSegments(response.data.segments);
-      setStatus('reviewing');
-    } catch (err: any) {
-      setError("Transcription failed: " + (err.response?.data?.detail || err.message));
-      setStatus('idle');
+      const res = await axios.get(`${API_URL}/project/${id}`);
+      const data = res.data;
+
+      setProjectId(data.id);
+      setStatus(data.status);
+      setTargetLang(data.target_language);
+
+      // 恢复片段
+      const allSegments = data.segments.map((s: any) => ({
+        id: s.id, start: s.start, end: s.end, text: s.text
+      }));
+      const translated = data.segments
+        .filter((s: any) => s.text_translated)
+        .map((s: any) => ({
+          id: s.id, start: s.start, end: s.end, text: s.text_translated
+        }));
+
+      setSegments(allSegments);
+      setTranslatedSegments(translated);
+
+    } catch (err) {
+      console.error("Failed to restore project:", err);
+      // 如果报错说明项目不存在或过期，清除 localStorage
+      localStorage.removeItem('vibe_project_id');
     }
   };
 
-  const handleTranslate = async () => {
-    setStatus('translating');
-    setError(null);
-    setTranslatedSegments([]); // Reset previous translations
+  useEffect(() => {
+    const pendingCount = segments.length - translatedSegments.length;
+
+    if (pendingCount > 0 && ['reviewing', 'translating'].includes(status) && !isProcessingRef.current) {
+      processQueue();
+    } else if (pendingCount === 0 && segments.length > 0 && ['reviewing', 'translating'].includes(status)) {
+      setStatus('translated');
+    }
+  }, [segments, translatedSegments, status]);
+
+  const processQueue = async () => {
+    const pendingCount = segments.length - translatedSegments.length;
+    if (isProcessingRef.current || pendingCount === 0) return;
+
+    isProcessingRef.current = true;
+    const context = translatedSegments.slice(-5).map(s => s.text);
 
     try {
-      const response = await fetch(`${API_URL}/translate-stream`, {
+      const res = await fetch(`${API_URL}/translate-stream`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          segments: segments,
-          target_language: targetLang === 'zh' ? 'Chinese' : 'English'
-        }),
+          project_id: projectId,
+          target_language: targetLang === 'zh' ? 'Chinese' : 'English',
+          context: context
+        })
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No reader available");
-
+      const reader = res.body?.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
+      if (reader) {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          // 处理最后一行可能不完整的情况
+          buffer = lines.pop() || "";
 
-        // Keep the last partial line in the buffer
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (line.trim()) {
+          for (const line of lines) {
+            if (!line.trim()) continue;
             try {
-              const chunk = JSON.parse(line);
-              setTranslatedSegments(prev => [...prev, ...chunk]);
+              const chunk: Segment[] = JSON.parse(line);
+              setTranslatedSegments(prev => {
+                const merged = [...prev];
+                chunk.forEach(ns => {
+                  const idx = merged.findIndex(s => s.id === ns.id);
+                  if (idx >= 0) {
+                    merged[idx] = ns;
+                  } else {
+                    merged.push(ns);
+                  }
+                });
+                return [...merged].sort((a, b) => a.start - b.start);
+              });
             } catch (e) {
-              console.error("Error parsing chunk:", e);
+              console.error("JSON parse error in stream:", e, "Line:", line);
             }
           }
         }
       }
 
-      setStatus('dubbing');
-    } catch (err: any) {
-      setError("Translation failed: " + (err.response?.data?.detail || err.message));
-      setStatus('reviewing');
+    } catch (e: any) {
+      console.error("❌ Queue process error:", e);
+      // 报错后等待 2 秒自动重试，防止死循环
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } finally {
+      isProcessingRef.current = false;
+      // 退出 processing 后，如果有依赖项更新，`useEffect` 会重新调用 processQueue()
     }
   };
 
+  // ==================================================
+  // 交互处理
+  // ==================================================
+
+  const handleRetranslate = async (segmentId: string, mode: 'single' | 'all_after' = 'single') => {
+    if (!projectId) return;
+    try {
+      await axios.post(`${API_URL}/project/${projectId}/segment/${segmentId}/reset?mode=${mode}`);
+      // Update local state to remove the translated segment, which will trigger the queue processor
+      if (mode === 'single') {
+        setTranslatedSegments(prev => prev.filter(t => t.id !== segmentId));
+      } else {
+        const res = await axios.get(`${API_URL}/project/${projectId}`);
+        const data = res.data;
+        setStatus(data.status);
+        const translated = data.segments
+          .filter((s: any) => s.text_translated)
+          .map((s: any) => ({
+            id: s.id, start: s.start, end: s.end, text: s.text_translated
+          }));
+        setTranslatedSegments(translated);
+      }
+
+      if (status === 'translated') {
+        setStatus('reviewing');
+      }
+    } catch (err) {
+      console.error("Failed to reset segment translation", err);
+    }
+  };
+
+  const handleVideoSelected = (data: any) => {
+    setProjectId(data.project_id);
+    localStorage.setItem('vibe_project_id', data.project_id);
+
+    setSegments([]);
+    setTranslatedSegments([]);
+    isProcessingRef.current = false;
+    setStatus('transcribing');
+    setError(null);
+
+    const ws = new WebSocket(`${API_URL.replace('http', 'ws')}/ws/transcribe`);
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "segment") setSegments(p => [...p, msg.data]);
+      if (msg.type === "done") setStatus('reviewing');
+      if (msg.type === "error") {
+        setError(msg.message);
+        setStatus('idle');
+      }
+    };
+    ws.onopen = () => ws.send(JSON.stringify({
+      video_path: data.path,
+      project_id: data.project_id
+    }));
+    ws.onerror = () => setError("WebSocket connection failed.");
+  };
 
   const handleDub = async () => {
-    // Only separate background for now as per backend implementation
-    // But we need to call /dub
     setStatus('dubbing');
     try {
-      const response = await axios.post(`${API_URL}/dub`, {
-        video_path: videoData.path,
-        segments: translatedSegments,
+      const res = await axios.post(`${API_URL}/dub`, {
+        project_id: projectId,
         voice: targetLang === 'zh' ? 'zh-CN-XiaoxiaoNeural' : 'en-US-AriaNeural'
       });
-      setFinalVideo(response.data.url);
+      setFinalVideo(res.data.url);
       setStatus('finished');
-    } catch (err: any) {
-      setError("Dubbing failed: " + (err.response?.data?.detail || err.message));
-      // If failed, maybe stay in dubbing state or go back?
-      setStatus('reviewing');
+    } catch (e: any) {
+      setError(e.response?.data?.detail || e.message);
+      setStatus('translated');
     }
   };
 
-  // Auto-trigger dubbing after translation for MVP smoothness?
-  // Let's keep it manual so user can see translation.
+  // ==================================================
+  // 渲染逻辑
+  // ==================================================
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col items-center py-10 px-4">
-      <header className="mb-10 text-center">
-        <h1 className="text-4xl font-bold tracking-tight text-primary mb-2">Vibe Video</h1>
-        <p className="text-muted-foreground">AI Video Dubbing & Translation</p>
-      </header>
+    <div className="min-h-screen bg-slate-50 flex flex-col items-center py-8 px-4 font-sans text-slate-900">
+      <Header status={status} />
 
-      <main className="w-full max-w-4xl space-y-8">
-        {/* Status Steps */}
-        <div className="flex justify-between items-center px-10">
-          {['Upload', 'Transcribe', 'Translate', 'Dub'].map((step, idx) => {
-
-            // Simple visual logic...
-            return (
-              <div key={step} className="flex flex-col items-center">
-                <div className={cn("w-8 h-8 rounded-full flex items-center justify-center border-2 transition-colors",
-                  status === step.toLowerCase() || (status === 'reviewing' && step === 'Transcribe') || (status === 'finished' && step === 'Dub')
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-muted text-muted-foreground"
-                )}>
-                  {idx + 1}
-                </div>
-                <span className="text-xs mt-1">{step}</span>
-              </div>
-            )
-          })}
+      {error && (
+        <div className="w-full max-w-5xl p-4 mb-4 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center gap-2">
+          <span className="font-bold">Error:</span> {error}
         </div>
+      )}
 
-        {error && (
-          <div className="p-4 bg-red-100 text-red-800 rounded-md border border-red-200 w-full">
-            Error: {error}
-          </div>
+      <div className="w-full max-w-5xl">
+        {status === 'idle' && <VideoInput onVideoSelected={handleVideoSelected} />}
+
+        {['transcribing', 'reviewing', 'translating', 'translated'].includes(status) && (
+          <TranslationWorkspace
+            status={status}
+            segments={segments}
+            translatedSegments={translatedSegments}
+            targetLang={targetLang}
+            setTargetLang={setTargetLang}
+            onDub={handleDub}
+            onRetranslate={handleRetranslate}
+          />
         )}
 
-        {status === 'idle' && (
-          <VideoInput onVideoSelected={handleVideoSelected} />
-        )}
-
-        {status === 'transcribing' && (
-          <div className="flex flex-col items-center justify-center py-20">
-            <Loader2 className="w-12 h-12 animate-spin text-primary mb-4" />
-            <p className="text-lg">Transcribing Audio...</p>
-            <p className="text-sm text-muted-foreground">This may take a minute depending on video length.</p>
-          </div>
-        )}
-
-        {status === 'reviewing' && (
-          <div className="space-y-6">
-            <div className="bg-card border rounded-xl p-6">
-              <h2 className="text-xl font-semibold mb-4 flex items-center">
-                <FileAudio className="mr-2 w-5 h-5" /> Original Transcript ({segments.length} segments)
-              </h2>
-              <div className="max-h-60 overflow-y-auto space-y-2 mb-6 border p-2 rounded">
-                {segments.map((s, i) => (
-                  <p key={i} className="text-sm"><span className="text-muted-foreground">[{s.start.toFixed(1)}s]</span> {s.text}</p>
-                ))}
-              </div>
-
-              <div className="flex items-center space-x-4 border-t pt-4">
-                <Languages className="w-5 h-5" />
-                <span className="font-medium">Target Language:</span>
-                <select
-                  value={targetLang}
-                  onChange={(e) => setTargetLang(e.target.value)}
-                  className="border rounded p-2 bg-background"
-                >
-                  <option value="zh">Chinese (Simplified)</option>
-                  <option value="en">English</option>
-                </select>
-
-                <button
-                  onClick={handleTranslate}
-                  className="ml-auto bg-primary text-primary-foreground px-6 py-2 rounded-lg hover:bg-primary/90"
-                >
-                  Translate
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {(status === 'translating' || (status === 'dubbing' && translatedSegments.length > 0)) && finalVideo === null && (
-          <div className="space-y-6">
-            <div className="bg-card border rounded-xl p-6">
-              <h2 className="text-xl font-semibold mb-4 flex items-center">
-                <Languages className="mr-2 w-5 h-5" />
-                {status === 'translating' ? "Translating Subtitles..." : "Translation Complete"}
-                {status === 'translating' && <Loader2 className="ml-2 w-4 h-4 animate-spin" />}
-              </h2>
-
-              <div className="max-h-96 overflow-y-auto space-y-2 mb-6 border p-4 rounded bg-slate-50/50">
-                {translatedSegments.map((s, i) => (
-                  <div key={i} className="text-sm grid grid-cols-2 gap-4 border-b border-slate-100 pb-2 mb-2 animate-in fade-in slide-in-from-left-2">
-                    <p className="text-muted-foreground italic">{segments[i]?.text}</p>
-                    <p className="font-medium text-blue-700">{s.text}</p>
-                  </div>
-                ))}
-
-                {status === 'translating' && translatedSegments.length < segments.length && (
-                  <div className="flex items-center space-x-2 text-sm text-muted-foreground animate-pulse mt-4">
-                    <div className="w-1.5 h-1.5 bg-primary rounded-full"></div>
-                    <span>Processing next segments...</span>
-                  </div>
-                )}
-              </div>
-
-              {status === 'dubbing' && (
-                <div className="flex justify-end">
-                  <button
-                    onClick={handleDub}
-                    className="bg-primary text-primary-foreground px-6 py-2 rounded-lg hover:bg-primary/90 flex items-center shadow-lg transition-all hover:scale-105"
-                  >
-                    <CheckCircle className="mr-2 w-4 h-4" />
-                    Generate Dubbed Video
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Quick Fix: 'dubbing' state logic above is messy. Let's assume 'dubbing' means IN PROGRESS.
-            I need a 'translated' state. 
-        */}
-
-        {/* Redoing the logic block for 'translated' state */}
-        {status === 'dubbing' && finalVideo === null && (
-          <div className="flex flex-col items-center justify-center py-20">
-            <Loader2 className="w-12 h-12 animate-spin text-primary mb-4" />
-            <p className="text-lg">Generating Audio & Mixing...</p>
-            <p className="text-sm text-muted-foreground">This involves TTS and video processing. Please wait.</p>
-          </div>
-        )}
+        {status === 'dubbing' && <DubbingStep />}
 
         {status === 'finished' && finalVideo && (
-          <div className="flex flex-col items-center space-y-6 animate-fade-in">
-            <div className="w-full aspect-video bg-black rounded-xl overflow-hidden shadow-2xl">
-              <video controls src={`${API_URL}${finalVideo}`} className="w-full h-full" />
-            </div>
-
-            <h2 className="text-2xl font-bold text-green-600 flex items-center">
-              <CheckCircle className="mr-2" /> Processing Complete!
-            </h2>
-
-            <button
-              onClick={() => window.location.reload()}
-              className="text-muted-foreground hover:text-foreground underline"
-            >
-              Start New Project
-            </button>
-          </div>
+          <FinishedPlayer videoUrl={`${API_URL}${finalVideo}`} />
         )}
-      </main>
+      </div>
     </div>
-  );
+  )
 }
 
-export default App;
+export default App

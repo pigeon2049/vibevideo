@@ -18,3 +18,5 @@ tenacity
 pydantic-settings
 pydub
 imageio-ffmpeg
+psutil
+nvidia-ml-py

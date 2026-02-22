@@ -25,7 +25,7 @@ export const TranslationWorkspace: React.FC<TranslationWorkspaceProps> = ({
 }) => {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editText, setEditText] = useState("");
-    const [selectedVoice, setSelectedVoice] = useState("default");
+    const [selectedVoice, setSelectedVoice] = useState("zh-CN-YunxiNeural");
 
     const startEditing = (id: string, text: string) => {
         setEditingId(id);
@@ -165,9 +165,8 @@ export const TranslationWorkspace: React.FC<TranslationWorkspaceProps> = ({
                             onChange={(e) => setSelectedVoice(e.target.value)}
                             className="border border-slate-300 rounded-lg px-3 py-2 text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none bg-white"
                         >
-                            <option value="default">Default Voice</option>
-                            <option value="zh-CN-XiaoxiaoNeural">女声 (Xiaoxiao)</option>
                             <option value="zh-CN-YunxiNeural">男声 (Yunxi)</option>
+                            <option value="zh-CN-XiaoxiaoNeural">女声 (Xiaoxiao)</option>
                         </select>
                         <button
                             onClick={() => onDub(selectedVoice)}

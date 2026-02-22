@@ -8,6 +8,7 @@ from app.api.routers.projects import router as projects_router
 from app.api.routers.transcription import router as transcription_router
 from app.api.routers.translation import router as translation_router
 from app.api.routers.dubbing import router as dubbing_router
+from app.api.routers.system import router as system_router
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging
@@ -45,6 +46,7 @@ app.include_router(projects_router, prefix=settings.API_V1_STR)
 app.include_router(transcription_router, prefix=settings.API_V1_STR)
 app.include_router(translation_router, prefix=settings.API_V1_STR)
 app.include_router(dubbing_router, prefix=settings.API_V1_STR)
+app.include_router(system_router, prefix=settings.API_V1_STR)
 
 # Static Files
 app.mount("/output", StaticFiles(directory=str(settings.OUTPUT_DIR)), name="output")
@@ -63,4 +65,12 @@ if __name__ == "__main__":
     import uvicorn
     # Important: run this as app.main:app
     # loop="asyncio" + policy setup in backend/app/main.py ensures windows subprocess support
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True, loop="asyncio")
+    # log_config=None ensures uvicorn doesn't overwrite our setup_logging() configuration
+    uvicorn.run(
+        "app.main:app", 
+        host="0.0.0.0", 
+        port=8000, 
+        reload=False, 
+        loop="asyncio", 
+        log_config=None
+    )

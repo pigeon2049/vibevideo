@@ -44,7 +44,7 @@ class ProjectManager:
         if resume and project.segments:
             resume_start = project.segments[-1].end_time
 
-        audio_path = transcription_service.extract_audio(project.video_path, start_time=resume_start)
+        audio_path = await transcription_service.extract_audio(project.video_path, start_time=resume_start)
         logger.info(f"Starting transcription for project {project_id}, audio: {audio_path}")
         try:
             segments = await transcription_service.transcribe(audio_path, resume_start=resume_start)
@@ -214,11 +214,11 @@ class ProjectManager:
         # Audio processing steps
         yield {"step": "isolate"}
         logger.info("Starting audio processing: isolation")
-        orig_audio = audio_service.isolate_audio(project.video_path)
+        orig_audio = await audio_service.isolate_audio(project.video_path)
         
         yield {"step": "separate"}
         logger.info("Starting audio processing: separation")
-        separated = audio_service.separate_vocals(orig_audio)
+        separated = await audio_service.separate_vocals(orig_audio)
         
         yield {"step": "merge"}
         logger.info("Starting audio processing: merge")
@@ -235,7 +235,7 @@ class ProjectManager:
         srt_path.write_text(srt_content, encoding="utf-8")
 
         # Merge
-        final_video_temp = audio_service.merge_audio_video(
+        final_video_temp = await audio_service.merge_audio_video(
             project.video_path,
             separated["background"],
             paragraphs_with_audio,

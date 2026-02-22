@@ -172,11 +172,11 @@ class TranscriptionService:
         # Deprecated: FFmpeg handles model loading
         pass
 
-    def extract_audio(self, video_path: str, start_time: float = 0.0) -> str:
+    async def extract_audio(self, video_path: str, start_time: float = 0.0) -> str:
         output_path = settings.TEMP_DIR / f"{Path(video_path).stem}_{start_time}.wav"
         
         command = [
-            str(settings.FFMPEG_PATH), "-y", "-i", video_path,
+            "-y", "-i", video_path,
             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1"
         ]
         if start_time > 0:
@@ -184,7 +184,17 @@ class TranscriptionService:
         command.append(str(output_path))
 
         logger.info(f"Extracting audio from {video_path} starting at {start_time}")
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        process = await asyncio.create_subprocess_exec(
+            str(settings.FFMPEG_PATH), *command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await process.wait()
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg audio extraction failed with code {process.returncode}")
+            raise subprocess.CalledProcessError(process.returncode, [str(settings.FFMPEG_PATH)] + command)
+            
         return str(output_path)
 
     async def transcribe(self, audio_path: str, resume_start: float = 0.0, progress_callback=None) -> List[Dict]:
@@ -233,6 +243,7 @@ class TranscriptionService:
                 ]
                 
                 import subprocess
+                logger.info(f"Starting FFmpeg transcription for: {audio_path}")
                 logger.info("Starting FFmpeg via subprocess.Popen (Robust Windows workaround)...")
                 try:
                     # Use subprocess.Popen which is more reliable on Windows regardless of event loop type

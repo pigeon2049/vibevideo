@@ -1,4 +1,5 @@
 import os
+import asyncio
 import subprocess
 import logging
 import math
@@ -24,28 +25,36 @@ class AudioService:
         if os.path.exists(ffprobe_exe):
             AudioSegment.ffprobe = ffprobe_exe
 
-    def isolate_audio(self, video_path: str) -> str:
+    async def isolate_audio(self, video_path: str) -> str:
         """Extracts audio from video."""
         output_path = settings.TEMP_DIR / f"{Path(video_path).stem}_full.wav"
         
         cmd = [
-            self.ffmpeg_exe, "-y",
+            "-y",
             "-i", video_path,
             "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
             str(output_path)
         ]
         
         logger.info(f"Isolating audio from {video_path}")
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = await asyncio.create_subprocess_exec(
+            self.ffmpeg_exe, *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg error: {stderr.decode()}")
+            raise subprocess.CalledProcessError(process.returncode, [self.ffmpeg_exe] + cmd, stdout, stderr)
         return str(output_path)
 
-    def separate_vocals(self, audio_path: str) -> Dict[str, str]:
+    async def separate_vocals(self, audio_path: str) -> Dict[str, str]:
         """Separates vocals using Demucs."""
         model = "htdemucs"
         output_dir = settings.TEMP_DIR / "separated"
         
         cmd = [
-            "demucs", 
             "-n", model,
             "--two-stems=vocals",
             "-o", str(output_dir),
@@ -53,7 +62,16 @@ class AudioService:
         ]
         
         logger.info(f"Running Demucs on {audio_path}")
-        subprocess.run(cmd, check=True)
+        process = await asyncio.create_subprocess_exec(
+            "demucs", *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"Demucs error: {stderr.decode()}")
+            # Fallback will handle it
         
         filename = Path(audio_path).stem
         base_dir = output_dir / model / filename
@@ -70,7 +88,7 @@ class AudioService:
             
         return results
 
-    def merge_audio_video(
+    async def merge_audio_video(
         self, 
         video_path: str, 
         background_audio: str, 
@@ -81,7 +99,7 @@ class AudioService:
         """Merges video with mixed background audio and TTS segments."""
         
         logger.info("Loading background audio for mixing...")
-        bg_track = AudioSegment.from_file(background_audio)
+        bg_track = await asyncio.to_thread(AudioSegment.from_file, background_audio)
         
         if bg_volume < 1.0:
             db_change = 20 * math.log10(max(bg_volume, 0.001))
@@ -92,7 +110,7 @@ class AudioService:
             audio_file = seg.get("audio_file")
             if audio_file and os.path.exists(audio_file):
                 try:
-                    tts_track = AudioSegment.from_file(audio_file)
+                    tts_track = await asyncio.to_thread(AudioSegment.from_file, audio_file)
                     pos_ms = int(seg.get("start", 0) * 1000)
                     
                     # Check if audio needs speed adjustment
@@ -105,8 +123,8 @@ class AudioService:
                         
                         # Apply speed adjustment
                         try:
-                            sped_up_file = self._adjust_audio_speed(audio_file, speed_factor)
-                            tts_track = AudioSegment.from_file(sped_up_file)
+                            sped_up_file = await self._adjust_audio_speed(audio_file, speed_factor)
+                            tts_track = await asyncio.to_thread(AudioSegment.from_file, sped_up_file)
                             # Update duration for ducking
                             actual_duration_ms = len(tts_track)
                         except Exception as e:
@@ -137,16 +155,12 @@ class AudioService:
         mixed_audio_path = settings.TEMP_DIR / f"mixed_{uuid.uuid4().hex[:8]}.wav"
         logger.info("Exporting mixed audio track...")
         
-        # Apply more sophisticated mixing if possible, or just export the layered track
-        # For professional results, we often "duck" the background music 
-        # when speech is present.
-        
-        bg_track.export(str(mixed_audio_path), format="wav")
+        await asyncio.to_thread(bg_track.export, str(mixed_audio_path), format="wav")
         
         output_path = settings.OUTPUT_DIR / f"{Path(video_path).stem}_final.mp4"
         
         cmd = [
-            self.ffmpeg_exe, "-y",
+            "-y",
             "-i", video_path,
             "-i", str(mixed_audio_path)
         ]
@@ -170,11 +184,20 @@ class AudioService:
         ])
         
         logger.info("Running ffmpeg to merge video and audio...")
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = await asyncio.create_subprocess_exec(
+            self.ffmpeg_exe, *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg merge error: {stderr.decode()}")
+            raise subprocess.CalledProcessError(process.returncode, [self.ffmpeg_exe] + cmd, stdout, stderr)
         
         return str(output_path)
 
-    def mix_audio_tracks(self, background_path: str, speech_path: str, background_volume: float = 0.3) -> str:
+    async def mix_audio_tracks(self, background_path: str, speech_path: str, background_volume: float = 0.3) -> str:
         """
         Mixes background audio (at lower volume) with speech audio using ffmpeg filter_complex.
         (Preserved from services/audio_processor.py)
@@ -184,17 +207,26 @@ class AudioService:
         filter_complex = f"[0:a]volume={background_volume}[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first"
         
         cmd = [
-            self.ffmpeg_exe, "-y",
+            "-y",
             "-i", background_path,
             "-i", speech_path,
             "-filter_complex", filter_complex,
             str(output_path)
         ]
         
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = await asyncio.create_subprocess_exec(
+            self.ffmpeg_exe, *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg mix error: {stderr.decode()}")
+            raise subprocess.CalledProcessError(process.returncode, [self.ffmpeg_exe] + cmd, stdout, stderr)
         return str(output_path)
 
-    def _adjust_audio_speed(self, input_path: str, speed_factor: float) -> str:
+    async def _adjust_audio_speed(self, input_path: str, speed_factor: float) -> str:
         """Adjusts audio speed using ffmpeg atempo filter."""
         output_path = settings.TEMP_DIR / f"speedup_{uuid.uuid4().hex[:8]}.wav"
         
@@ -216,14 +248,23 @@ class AudioService:
         filter_str = ",".join(filters)
         
         cmd = [
-            self.ffmpeg_exe, "-y",
+            "-y",
             "-i", input_path,
             "-filter:a", filter_str,
             str(output_path)
         ]
         
         logger.info(f"Speeding up audio: {input_path} with filters: {filter_str}")
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = await asyncio.create_subprocess_exec(
+            self.ffmpeg_exe, *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg speed adjustment error: {stderr.decode()}")
+            raise subprocess.CalledProcessError(process.returncode, [self.ffmpeg_exe] + cmd, stdout, stderr)
         return str(output_path)
 
 audio_service = AudioService()

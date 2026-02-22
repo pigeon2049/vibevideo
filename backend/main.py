@@ -131,7 +131,7 @@ async def download_video_endpoint(request: DownloadRequest, db: Session = Depend
     try:
         print(f"📥 Received download task: {request.url}")
         # 该操作通常涉及长时间 IO，建议确保 downloader 内部无阻塞或运行在执行器中
-        result = downloader.download_video(request.url, request.cookies)
+        result = await downloader.download(request.url, request.cookies)
         
         # 检查是否已存在具有相同 video_path 的项目
         existing_project = db.query(Project).filter(Project.video_path == result.get("path")).first()
@@ -450,10 +450,10 @@ async def dub_endpoint(request: DubRequest, db: Session = Depends(get_db)):
                 
                 print("🔍 Step 2: Isolating and separating audio layers...")
                 yield json.dumps({"step": "isolate"}) + "\n"
-                original_audio = await loop.run_in_executor(None, audio_processor.isolate_audio, project.video_path)
+                original_audio = await audio_processor.isolate_audio(project.video_path)
                 
                 yield json.dumps({"step": "separate"}) + "\n"
-                separated = await loop.run_in_executor(None, audio_processor.separate_vocals, original_audio)
+                separated = await audio_processor.separate_vocals(original_audio)
                 
                 print("🛠 Step 3: Merging final high-fidelity video...")
                 yield json.dumps({"step": "merge"}) + "\n"
@@ -530,4 +530,10 @@ if __name__ == "__main__":
         
     print("🔥 Vibe Video Backend is firing up on http://localhost:8000")
     # loop="asyncio" + policy setup above ensures windows subprocess support
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, loop="asyncio")
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=8000, 
+        reload=False, 
+        loop="asyncio"
+    )

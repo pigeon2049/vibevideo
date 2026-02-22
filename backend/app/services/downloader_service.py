@@ -1,4 +1,5 @@
 import os
+import asyncio
 import sys
 import tempfile
 import subprocess
@@ -70,15 +71,14 @@ class DownloaderService:
                 info_cmd.extend(['--cookies', temp_cookie_for_info])
 
             logger.info(f"Fetching video info for: {url}")
-            process = subprocess.Popen(
-                info_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8',
-                errors='replace'
+            process = await asyncio.create_subprocess_exec(
+                *info_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = process.communicate()
+            stdout_bytes, stderr_bytes = await process.communicate()
+            stdout = stdout_bytes.decode('utf-8', errors='replace')
+            stderr = stderr_bytes.decode('utf-8', errors='replace')
             
             if process.returncode == 0:
                 video_info = json.loads(stdout)
@@ -142,8 +142,14 @@ class DownloaderService:
             for client in clients:
                 cmd = build_cmd(player_client=client)
                 logger.info(f"Attempting download with client: {client or 'default'}")
-                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-                out, err = p.communicate()
+                p = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                out_bytes, err_bytes = await p.communicate()
+                out = out_bytes.decode('utf-8', errors='replace')
+                err = err_bytes.decode('utf-8', errors='replace')
                 if p.returncode == 0:
                     info = json.loads(out)
                     return {
@@ -163,8 +169,14 @@ class DownloaderService:
                 list_cmd.extend(['--cookies', cookie_file])
                 list_cmd.extend(['--extractor-args', 'youtube:player_client=android_creator'])
             
-            lp = subprocess.Popen(list_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-            lout, lerr = lp.communicate()
+            lp = await asyncio.create_subprocess_exec(
+                *list_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            lout_bytes, lerr_bytes = await lp.communicate()
+            lout = lout_bytes.decode('utf-8', errors='replace')
+            lerr = lerr_bytes.decode('utf-8', errors='replace')
             if lp.returncode == 0:
                 best_fmt = None
                 # Simple priority: video+audio (mp4/webm)
@@ -174,8 +186,14 @@ class DownloaderService:
                         break
                 if best_fmt:
                     cmd = build_cmd(format_spec=best_fmt)
-                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-                    out, err = p.communicate()
+                    p = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    out_bytes, err_bytes = await p.communicate()
+                    out = out_bytes.decode('utf-8', errors='replace')
+                    err = err_bytes.decode('utf-8', errors='replace')
                     if p.returncode == 0:
                         info = json.loads(out)
                         return {
@@ -192,24 +210,6 @@ class DownloaderService:
             if cookie_file and os.path.exists(cookie_file):
                 os.remove(cookie_file)
 
-    # Alias for compatibility with root services call format
-    def download_video(self, url: str, cookies: str = None) -> dict:
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        if loop.is_running():
-            # This is tricky if called from sync context in async app, 
-            # but main.py calls it as downloader.download_video(url, cookies)
-            # which is sync. We use run_in_executor or similar? 
-            # Actually, let's just make it sync or handle both.
-            # For now, let's use a wrapper that runs the async part.
-            return loop.run_until_complete(self.download(url, cookies))
-        else:
-            return asyncio.run(self.download(url, cookies))
 
 downloader_service = DownloaderService()
 

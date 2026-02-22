@@ -4,6 +4,7 @@ import { Header } from './components/Header'
 import { DubbingStep } from './components/DubbingStep'
 import { FinishedPlayer } from './components/FinishedPlayer'
 import { TranslationWorkspace } from './components/TranslationWorkspace'
+import { LogTerminal } from './components/LogTerminal'
 import { useTranslationPipeline } from './hooks/useTranslationPipeline'
 
 function App() {
@@ -67,6 +68,7 @@ function App() {
           />
         )}
       </div>
+      <LogTerminal />
     </div>
   )
 }

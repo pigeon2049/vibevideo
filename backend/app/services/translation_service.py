@@ -14,13 +14,12 @@ logger = logging.getLogger("vibe-video.translation")
 class TranslationService:
     def __init__(self):
         self.providers = []
-        self.strategy = settings.LLM_STRATEGY
+        self.strategy = os.getenv("LLM_STRATEGY", settings.LLM_STRATEGY)
         self.current_index = 0
         self._load_providers()
 
     def _load_providers(self):
         # Load numbered providers from env
-        # Note: In a real app, this would be more dynamic
         for i in range(11): # 0 (default) to 10
             suffix = str(i) if i > 0 else ""
             api_key = os.environ.get(f"OPENAI_API_KEY{suffix}")
@@ -83,11 +82,10 @@ Segments to translate:
         context_buffer = history_context.copy()
         total_chunks = (len(segments) + chunk_size - 1) // chunk_size
         
-        logger.info(f"Starting translation: {len(segments)} segments in {total_chunks} chunks.")
+        logger.info(f"Starting translation: {len(segments)} segments in {total_chunks} chunks. Strategy: {self.strategy}")
 
         if self.strategy == "concurrent":
-            # Concurrent implementation using as_completed to maintain order
-            loop = asyncio.get_event_loop()
+            max_workers = len(self.providers)
             all_chunks = []
             for i in range(0, len(segments), chunk_size):
                 chunk = segments[i : i + chunk_size]
@@ -95,25 +93,45 @@ Segments to translate:
 
             results_map = {}
             next_expected_idx = 1
-            
-            # This is a bit complex for a simple refactor, but kept for parity with original code
-            # In a clean refactor, we'd use a Semaphore or similar to control concurrency
-            for idx, chunk_data in all_chunks:
-                # Mocking the original concurrent logic but making it more async-friendly
-                # For now, let's keep it sequential or use run_in_executor
-                pass
+            loop = asyncio.get_running_loop()
 
-        # Simplified sequential generator for better reliability and context flow
-        for i in range(0, len(segments), chunk_size):
-            chunk_idx = i // chunk_size + 1
-            chunk = segments[i : i + chunk_size]
-            context_text = " ".join(context_buffer[-8:])
+            async def process_one_chunk(idx, chunk_data):
+                nonlocal next_expected_idx
+                # Capture current context snapshot for this chunk
+                context_text = " ".join(context_buffer[-8:])
+                translated = await self._translate_chunk_with_retry(
+                    chunk_data, target_language, context_text, idx, total_chunks
+                )
+                return idx, translated
+
+            # Launch all tasks
+            tasks = [process_one_chunk(idx, chunk) for idx, chunk in all_chunks]
             
-            translated_chunk = await self._translate_chunk_with_retry(chunk, target_language, context_text, chunk_idx, total_chunks)
-            if translated_chunk:
-                for seg in translated_chunk:
-                    context_buffer.append(seg.get('text', ''))
-                yield translated_chunk
+            for coro in asyncio.as_completed(tasks):
+                idx, translated_chunk = await coro
+                results_map[idx] = translated_chunk
+                
+                # Yield in order
+                while next_expected_idx in results_map:
+                    chunk_res = results_map.pop(next_expected_idx)
+                    for seg in chunk_res:
+                        context_buffer.append(seg.get('text', ''))
+                    yield chunk_res
+                    next_expected_idx += 1
+        else:
+            # Sequential strategy
+            for i in range(0, len(segments), chunk_size):
+                chunk_idx = i // chunk_size + 1
+                chunk = segments[i : i + chunk_size]
+                context_text = " ".join(context_buffer[-8:])
+                
+                translated_chunk = await self._translate_chunk_with_retry(
+                    chunk, target_language, context_text, chunk_idx, total_chunks
+                )
+                if translated_chunk:
+                    for seg in translated_chunk:
+                        context_buffer.append(seg.get('text', ''))
+                    yield translated_chunk
 
     async def _translate_chunk_with_retry(self, chunk, target_lang, context_text, idx, total, max_retries=3):
         attempt = 0
@@ -125,7 +143,7 @@ Segments to translate:
             logger.info(f"Translating chunk {idx}/{total} with {provider['name']} (attempt {attempt+1})")
             
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
                     model=model,
                     messages=[
@@ -153,7 +171,14 @@ Segments to translate:
 
     def _parse_json_response(self, content: str) -> List[Dict]:
         try:
+            # More robust JSON cleaning
             clean_content = re.sub(r'```json\s*|```', '', content).strip()
+            # If still starts with something before [, try to find [
+            if not clean_content.startswith('['):
+                match = re.search(r'\[.*\]', clean_content, re.DOTALL)
+                if match:
+                    clean_content = match.group(0)
+
             raw_data = json.loads(clean_content)
             if isinstance(raw_data, list):
                 return raw_data
@@ -162,11 +187,12 @@ Segments to translate:
                     if isinstance(val, list):
                         return val
         except Exception as e:
-            logger.error(f"JSON Parse Error: {e}")
+            logger.error(f"JSON Parse Error: {e}. Content preview: {content[:100]}...")
         return []
 
     def _validate_translation(self, original_chunk, translated_chunk, target_lang, raw_content) -> bool:
         if not translated_chunk or len(translated_chunk) != len(original_chunk):
+            logger.warning(f"Count mismatch: expected {len(original_chunk)}, got {len(translated_chunk) if translated_chunk else 0}")
             return False
             
         # Parroting check
@@ -176,7 +202,7 @@ Segments to translate:
             return False
             
         # Language check (Chinese specifically)
-        if target_lang in ['Chinese', 'zh']:
+        if target_lang in ['Chinese', 'zh', 'zh-CN']:
             has_chinese = any('\u4e00' <= char <= '\u9fff' for char in raw_content)
             if not has_chinese:
                 logger.warning("No Chinese characters found in output.")
@@ -185,3 +211,4 @@ Segments to translate:
         return True
 
 translation_service = TranslationService()
+

@@ -114,6 +114,16 @@ class ProjectManager:
         project.status = "dubbing"
         db.commit()
 
+        # Handle default voice selection
+        if not voice or (isinstance(voice, str) and voice.lower() == "default"):
+            if project.target_language == "zh":
+                voice = tts_service.default_voice_zh
+            else:
+                voice = tts_service.default_voice_en
+            logger.info(f"[MANAGER] Using default voice: '{voice}' for language: '{project.target_language}'")
+        else:
+            logger.info(f"[MANAGER] Using requested voice: '{voice}'")
+
         segments = db.query(Segment).filter(Segment.project_id == project_id).order_by(Segment.start_time).all()
         
         # Group segments into paragraphs for more natural TTS

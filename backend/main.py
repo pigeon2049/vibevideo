@@ -24,11 +24,14 @@ dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 
 # 2. 业务组件导入
-from services import downloader, translator, tts, audio_processor
-from services.transcriber import router as transcriber_router
-from utils.file_manager import TEMP_DIR, OUTPUT_DIR, VIDEO_DIR
-from db.database import engine, Base, get_db
-from db.models import Project, Segment
+from app.services.downloader_service import downloader_service as downloader
+from app.services.translation_service import translation_service as translator
+from app.services.tts_service import tts_service as tts
+from app.services.audio_service import audio_service as audio_processor
+from app.api.routers.transcription import router as transcriber_router
+from app.utils.file_manager import TEMP_DIR, OUTPUT_DIR, VIDEO_DIR
+from app.db.database import engine, Base, get_db
+from app.db.models import Project, Segment
 
 # 自动创建所有表
 Base.metadata.create_all(bind=engine)
@@ -84,7 +87,7 @@ class UpdateTranslationRequest(BaseModel):
 
 class DubRequest(BaseModel):
     project_id: str
-    voice: str
+    voice: Optional[str] = None
     background_volume: float = 0.1
 
 # ==================================================
@@ -414,13 +417,26 @@ async def dub_endpoint(request: DubRequest, db: Session = Depends(get_db)):
                 for i, para in enumerate(paragraphs):
                     text = para["text"]
                     if text.strip():
-                        text_hash = hashlib.md5(f"{text}_{request.voice}".encode()).hexdigest()
+                        # Handle default voice selection
+                        voice = request.voice
+                        proj_lang = project.target_language or "zh"
+                        print(f"[DEBUG] Dubbing: Requested voice: '{voice}', Project language: '{proj_lang}'")
+                        if not voice or (isinstance(voice, str) and voice.lower() == "default"):
+                            if proj_lang == "zh":
+                                voice = tts.default_voice_zh
+                            else:
+                                voice = tts.default_voice_en
+                            print(f"[DEBUG] Dubbing: Using default voice '{voice}' for language '{proj_lang}'")
+                        else:
+                            print(f"[DEBUG] Dubbing: Using requested voice '{voice}'")
+
+                        text_hash = hashlib.md5(f"{text}_{voice}".encode()).hexdigest()
                         audio_path = os.path.join(AUDIO_DIR, f"tts_{text_hash}.mp3")
                         
                         if os.path.exists(audio_path):
                             print(f"⏩ Skipping TTS for paragraph {para['id']}, already exists")
                         else:
-                            audio_path = await tts.generate_speech(text, request.voice, output_file=audio_path)
+                            audio_path = await tts.generate_speech(text, voice, output_file=audio_path)
                             
                         for seg_id in para["segment_ids"]:
                             db_seg = stream_db.query(Segment).filter(Segment.id == seg_id).first()

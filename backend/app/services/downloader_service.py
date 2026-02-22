@@ -5,16 +5,22 @@ import subprocess
 import json
 import urllib.request
 import logging
+import time
+from pathlib import Path
+from typing import Dict, Optional
 from app.core.config import settings
 
 logger = logging.getLogger("vibe-video.services.downloader")
 
 class DownloaderService:
     def __init__(self):
-        self.yt_dlp_exe = settings.BIN_DIR / "yt-dlp.exe"
-        self.deno_exe = settings.BIN_DIR / "deno.exe"
+        self.yt_dlp_exe = str(settings.BIN_DIR / "yt-dlp.exe")
+        self.deno_exe = str(settings.BIN_DIR / "deno.exe")
+        self.bin_dir = str(settings.BIN_DIR)
+        self.video_dir = str(settings.VIDEO_DIR)
 
-    def get_system_proxy(self):
+    def get_system_proxy(self) -> Optional[str]:
+        """Detect system proxy settings on Windows."""
         try:
             proxies = urllib.request.getproxies()
             if proxies:
@@ -43,38 +49,29 @@ class DownloaderService:
         return None
 
     async def download(self, url: str, cookies: str = None) -> dict:
-        if not self.yt_dlp_exe.exists():
+        """
+        Robust download with fallback strategies and player client rotation.
+        """
+        if not os.path.exists(self.yt_dlp_exe):
             raise FileNotFoundError(f"yt-dlp.exe not found at {self.yt_dlp_exe}")
 
-        # Basic download logic (simplified from old one for clarity)
-        # We'll use subprocess.run for simplicity here, though in a real-world app we'd use async subprocess
+        # Check for existing file with this ID first
+        info_cmd = [self.yt_dlp_exe, url, '--dump-json', '--no-playlist', '--no-check-certificates']
+        proxy = self.get_system_proxy()
+        if proxy:
+            info_cmd.extend(['--proxy', proxy])
         
-        cookie_file = None
-        if cookies:
-            fd, cookie_file = tempfile.mkstemp(suffix=".txt", prefix="cookies_")
-            with os.fdopen(fd, 'w') as f:
-                f.write(cookies)
-
+        temp_cookie_for_info = None
         try:
-            outtmpl = str(settings.VIDEO_DIR / "%(id)s.%(ext)s")
-            cmd = [
-                str(self.yt_dlp_exe),
-                url,
-                '--output', outtmpl,
-                '--no-playlist',
-                '--print-json',
-                '--no-check-certificates',
-                '--ffmpeg-location', str(settings.BIN_DIR),
-            ]
+            if cookies:
+                fd, temp_cookie_for_info = tempfile.mkstemp(suffix=".txt", prefix="info_cookies_")
+                with os.fdopen(fd, 'w') as f:
+                    f.write(cookies)
+                info_cmd.extend(['--cookies', temp_cookie_for_info])
 
-            proxy = self.get_system_proxy()
-            if proxy:
-                cmd.extend(['--proxy', proxy])
-            if cookie_file:
-                cmd.extend(['--cookies', cookie_file])
-
+            logger.info(f"Fetching video info for: {url}")
             process = subprocess.Popen(
-                cmd,
+                info_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -82,21 +79,137 @@ class DownloaderService:
                 errors='replace'
             )
             stdout, stderr = process.communicate()
-
+            
             if process.returncode == 0:
-                info = json.loads(stdout)
-                return {
-                    "title": info.get("title", "Unknown"),
-                    "duration": info.get("duration", 0),
-                    "path": info.get("_filename"),
-                    "thumbnail": info.get("thumbnail"),
-                    "id": info.get("id")
-                }
+                video_info = json.loads(stdout)
+                video_id = video_info.get('id')
+                title = video_info.get('title', 'Unknown')
+                
+                if video_id:
+                    for f in os.listdir(self.video_dir):
+                        if f.startswith(f"{video_id}."):
+                            existing_path = os.path.join(self.video_dir, f)
+                            logger.info(f"Found existing download: {existing_path}")
+                            return {
+                                "title": title,
+                                "duration": video_info.get("duration", 0),
+                                "path": os.path.abspath(existing_path),
+                                "thumbnail": video_info.get("thumbnail"),
+                                "id": video_id
+                            }
             else:
-                raise Exception(f"Download failed: {stderr}")
+                logger.warning(f"Could not fetch video info: {stderr}")
+        except Exception as e:
+            logger.error(f"Error checking for existing download: {e}")
+        finally:
+            if temp_cookie_for_info and os.path.exists(temp_cookie_for_info):
+                os.remove(temp_cookie_for_info)
+
+        # Main download logic
+        cookie_file = None
+        if cookies:
+            fd, cookie_file = tempfile.mkstemp(suffix=".txt", prefix="cookies_")
+            with os.fdopen(fd, 'w') as f:
+                f.write(cookies)
+
+        try:
+            def build_cmd(format_spec=None, player_client=None):
+                outtmpl = os.path.join(self.video_dir, "%(id)s.%(ext)s")
+                cmd = [
+                    self.yt_dlp_exe, url,
+                    '--output', outtmpl,
+                    '--no-playlist',
+                    '--print-json',
+                    '--no-check-certificates',
+                    '--ffmpeg-location', self.bin_dir,
+                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                ]
+                if os.path.exists(self.deno_exe):
+                    cmd.extend(['--js-runtimes', f'deno:{self.deno_exe}'])
+                if format_spec:
+                    cmd.extend(['--format', format_spec])
+                if proxy:
+                    cmd.extend(['--proxy', proxy])
+                if cookie_file:
+                    cmd.extend(['--cookies', cookie_file])
+                    client = player_client or 'android_creator'
+                    cmd.extend(['--extractor-args', f'youtube:player_client={client}'])
+                return cmd
+
+            last_error = ""
+            # ATTEMPT 1: Try rotation of player clients
+            clients = ['web', 'android_creator', 'ios', 'android'] if cookie_file else [None]
+            for client in clients:
+                cmd = build_cmd(player_client=client)
+                logger.info(f"Attempting download with client: {client or 'default'}")
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+                out, err = p.communicate()
+                if p.returncode == 0:
+                    info = json.loads(out)
+                    return {
+                        "title": info.get("title", "Unknown"),
+                        "duration": info.get("duration", 0),
+                        "path": os.path.abspath(info.get("_filename")),
+                        "thumbnail": info.get("thumbnail"),
+                        "id": info.get("id")
+                    }
+                last_error = err
+                logger.warning(f"Client {client or 'default'} failed: {err[:200]}")
+
+            # ATTEMPT 2: Fallback to listed formats
+            list_cmd = [self.yt_dlp_exe, url, '--list-formats', '--no-check-certificates']
+            if proxy: list_cmd.extend(['--proxy', proxy])
+            if cookie_file: 
+                list_cmd.extend(['--cookies', cookie_file])
+                list_cmd.extend(['--extractor-args', 'youtube:player_client=android_creator'])
+            
+            lp = subprocess.Popen(list_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+            lout, lerr = lp.communicate()
+            if lp.returncode == 0:
+                best_fmt = None
+                # Simple priority: video+audio (mp4/webm)
+                for line in reversed(lout.splitlines()):
+                    if 'video' in line.lower() and 'audio' in line.lower() and ('mp4' in line.lower() or 'webm' in line.lower()):
+                        best_fmt = line.split()[0]
+                        break
+                if best_fmt:
+                    cmd = build_cmd(format_spec=best_fmt)
+                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+                    out, err = p.communicate()
+                    if p.returncode == 0:
+                        info = json.loads(out)
+                        return {
+                            "title": info.get("title", "Unknown"),
+                            "duration": info.get("duration", 0),
+                            "path": os.path.abspath(info.get("_filename")),
+                            "thumbnail": info.get("thumbnail"),
+                            "id": info.get("id")
+                        }
+
+            raise Exception(f"Download failed after all attempts. Last error: {last_error}")
 
         finally:
             if cookie_file and os.path.exists(cookie_file):
                 os.remove(cookie_file)
 
+    # Alias for compatibility with root services call format
+    def download_video(self, url: str, cookies: str = None) -> dict:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        if loop.is_running():
+            # This is tricky if called from sync context in async app, 
+            # but main.py calls it as downloader.download_video(url, cookies)
+            # which is sync. We use run_in_executor or similar? 
+            # Actually, let's just make it sync or handle both.
+            # For now, let's use a wrapper that runs the async part.
+            return loop.run_until_complete(self.download(url, cookies))
+        else:
+            return asyncio.run(self.download(url, cookies))
+
 downloader_service = DownloaderService()
+

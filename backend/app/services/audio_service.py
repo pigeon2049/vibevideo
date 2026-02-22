@@ -157,4 +157,25 @@ class AudioService:
         
         return str(output_path)
 
+    def mix_audio_tracks(self, background_path: str, speech_path: str, background_volume: float = 0.3) -> str:
+        """
+        Mixes background audio (at lower volume) with speech audio using ffmpeg filter_complex.
+        (Preserved from services/audio_processor.py)
+        """
+        output_path = settings.TEMP_DIR / f"mixed_{uuid.uuid4().hex[:8]}.wav"
+        
+        filter_complex = f"[0:a]volume={background_volume}[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first"
+        
+        cmd = [
+            self.ffmpeg_exe, "-y",
+            "-i", background_path,
+            "-i", speech_path,
+            "-filter_complex", filter_complex,
+            str(output_path)
+        ]
+        
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return str(output_path)
+
 audio_service = AudioService()
+

@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     WHISPER_MODEL: str = "ggml-large-v3.bin"
     VAD_MODEL: str = "ggml-silero-v5.1.2.bin"
     
+    # TTS Defaults
+    DEFAULT_VOICE_EN: str = "en-US-AriaNeural"
+    DEFAULT_VOICE_ZH: str = "zh-CN-YunxiNeural"
+    
     # External Tools
     FFMPEG_PATH: Path = BIN_DIR / "ffmpeg.exe"
     

@@ -9,12 +9,19 @@ logger = logging.getLogger("vibe-video.tts")
 
 class TTSService:
     def __init__(self):
-        self.default_voice_en = "en-US-AriaNeural"
-        self.default_voice_zh = "zh-CN-YunxiNeural"
+        self.default_voice_en = settings.DEFAULT_VOICE_EN
+        self.default_voice_zh = settings.DEFAULT_VOICE_ZH
 
-    async def generate_speech(self, text: str, voice: str, output_file: Optional[str] = None) -> str:
+    async def generate_speech(self, text: str, voice: Optional[str] = None, output_file: Optional[str] = None) -> str:
         if not text.strip():
             return ""
+
+        # Use default voice if none provided or if "default" string passed
+        if not voice or (isinstance(voice, str) and voice.lower() == "default"):
+            voice = self.default_voice_zh
+            logger.info(f"[TTS] No voice specified or 'default', using default: {voice}")
+        else:
+            logger.info(f"[TTS] Using specified voice: {voice}")
 
         if not output_file:
             text_hash = hashlib.md5(f"{text}_{voice}".encode()).hexdigest()

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from typing import Optional
 import json
 import logging
 from app.db.database import get_db
@@ -12,7 +13,7 @@ router = APIRouter(prefix="/dub", tags=["dubbing"])
 
 class DubRequest(BaseModel):
     project_id: str
-    voice: str
+    voice: Optional[str] = None
     background_volume: float = 0.1
 
 @router.post("")

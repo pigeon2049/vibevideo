@@ -8,7 +8,7 @@ interface TranslationWorkspaceProps {
     translatedSegments: Segment[];
     targetLang: string;
     setTargetLang: (val: string) => void;
-    onDub: () => void;
+    onDub: (voice: string) => void;
     onRetranslate: (id: string, mode: 'single' | 'all_after') => void;
     onUpdateTranslation?: (id: string, text: string) => void;
 }
@@ -25,6 +25,7 @@ export const TranslationWorkspace: React.FC<TranslationWorkspaceProps> = ({
 }) => {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editText, setEditText] = useState("");
+    const [selectedVoice, setSelectedVoice] = useState("default");
 
     const startEditing = (id: string, text: string) => {
         setEditingId(id);
@@ -158,12 +159,23 @@ export const TranslationWorkspace: React.FC<TranslationWorkspaceProps> = ({
                 </div>
 
                 {status === 'translated' && (
-                    <button
-                        onClick={onDub}
-                        className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-2.5 rounded-xl font-bold transition-all shadow-lg shadow-blue-200 flex items-center gap-2"
-                    >
-                        <CheckCircle size={18} /> Generate Dubbed Video
-                    </button>
+                    <div className="flex items-center gap-3">
+                        <select
+                            value={selectedVoice}
+                            onChange={(e) => setSelectedVoice(e.target.value)}
+                            className="border border-slate-300 rounded-lg px-3 py-2 text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                        >
+                            <option value="default">Default Voice</option>
+                            <option value="zh-CN-XiaoxiaoNeural">女声 (Xiaoxiao)</option>
+                            <option value="zh-CN-YunxiNeural">男声 (Yunxi)</option>
+                        </select>
+                        <button
+                            onClick={() => onDub(selectedVoice)}
+                            className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-2.5 rounded-xl font-bold transition-all shadow-lg shadow-blue-200 flex items-center gap-2"
+                        >
+                            <CheckCircle size={18} /> Generate Dubbed Video
+                        </button>
+                    </div>
                 )}
             </div>
         </div>

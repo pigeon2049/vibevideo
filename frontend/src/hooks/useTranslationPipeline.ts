@@ -126,7 +126,7 @@ export function useTranslationPipeline() {
         }
     }, [segments.length, translatedSegments.length, status, processTranslationQueue]);
 
-    const handleDub = async () => {
+    const handleDub = async (voice: string = 'default') => {
         setStatus('dubbing');
         try {
             const res = await fetch(`${API_BASE_URL}/dub`, {
@@ -134,7 +134,7 @@ export function useTranslationPipeline() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     project_id: projectId,
-                    voice: targetLang === 'zh' ? 'zh-CN-XiaoxiaoNeural' : 'en-US-AriaNeural'
+                    voice: voice
                 })
             });
             const reader = res.body?.getReader();

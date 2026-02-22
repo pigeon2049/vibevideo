@@ -95,9 +95,26 @@ class AudioService:
                     tts_track = AudioSegment.from_file(audio_file)
                     pos_ms = int(seg.get("start", 0) * 1000)
                     
+                    # Check if audio needs speed adjustment
+                    target_duration_ms = int((seg.get("end", 0) - seg.get("start", 0)) * 1000)
+                    actual_duration_ms = len(tts_track)
+                    
+                    if actual_duration_ms > target_duration_ms and target_duration_ms > 0:
+                        speed_factor = actual_duration_ms / target_duration_ms
+                        logger.info(f"Segment {seg.get('id')} duration {actual_duration_ms}ms > target {target_duration_ms}ms. Speeding up by {speed_factor:.2f}x")
+                        
+                        # Apply speed adjustment
+                        try:
+                            sped_up_file = self._adjust_audio_speed(audio_file, speed_factor)
+                            tts_track = AudioSegment.from_file(sped_up_file)
+                            # Update duration for ducking
+                            actual_duration_ms = len(tts_track)
+                        except Exception as e:
+                            logger.error(f"Failed to adjust speed for segment {seg.get('id')}: {e}")
+                    
                     # Implementation of Ducking:
                     # 1. Calculate duration of the speech
-                    duration_ms = len(tts_track)
+                    duration_ms = actual_duration_ms
                     
                     # 2. Extract the part of background music that overlaps with speech
                     # (Ensure we don't go out of bounds)
@@ -174,6 +191,38 @@ class AudioService:
             str(output_path)
         ]
         
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return str(output_path)
+
+    def _adjust_audio_speed(self, input_path: str, speed_factor: float) -> str:
+        """Adjusts audio speed using ffmpeg atempo filter."""
+        output_path = settings.TEMP_DIR / f"speedup_{uuid.uuid4().hex[:8]}.wav"
+        
+        # atempo filter only supports 0.5 to 2.0. 
+        # For factors outside this range, we need to chain filters.
+        filters = []
+        remaining_speed = speed_factor
+        
+        while remaining_speed > 2.0:
+            filters.append("atempo=2.0")
+            remaining_speed /= 2.0
+        
+        if remaining_speed < 0.5:
+            while remaining_speed < 0.5:
+                filters.append("atempo=0.5")
+                remaining_speed /= 0.5
+        
+        filters.append(f"atempo={remaining_speed}")
+        filter_str = ",".join(filters)
+        
+        cmd = [
+            self.ffmpeg_exe, "-y",
+            "-i", input_path,
+            "-filter:a", filter_str,
+            str(output_path)
+        ]
+        
+        logger.info(f"Speeding up audio: {input_path} with filters: {filter_str}")
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return str(output_path)
 

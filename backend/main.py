@@ -116,17 +116,12 @@ async def get_project(project_id: str, db: Session = Depends(get_db)):
         }
         for s in project.segments
     ]
-    
-    final_filename = f"{project.id}.mp4"
-    final_video_path = os.path.join(OUTPUT_DIR, final_filename)
-    final_video_url = f"/output/{final_filename}" if os.path.exists(final_video_path) else None
-
     return {
         "id": project.id,
         "video_path": project.video_path,
         "status": project.status,
         "target_language": project.target_language,
-        "final_video_url": final_video_url,
+        "final_video_url": project.final_video_url,
         "segments": segments
     }
 
@@ -493,6 +488,7 @@ async def dub_endpoint(request: DubRequest, db: Session = Depends(get_db)):
                 proj = stream_db.query(Project).filter(Project.id == request.project_id).first()
                 if proj:
                     proj.status = "finished"
+                    proj.final_video_url = f"/output/{final_filename}"
                     stream_db.commit()
                 
                 yield json.dumps({

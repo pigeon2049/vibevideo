@@ -252,11 +252,12 @@ class ProjectManager:
         shutil.move(final_video_temp, final_video)
 
         project.status = "finished"
+        project.final_video_url = f"/output/{final_filename}"
         db.commit()
         
         yield {
             "step": "done",
-            "url": f"/output/{final_filename}"
+            "url": project.final_video_url
         }
 
     def _format_timestamp(self, seconds: float) -> str:

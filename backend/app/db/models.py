@@ -14,6 +14,7 @@ class Project(Base):
     video_path = Column(String, index=True)
     status = Column(String, default="idle")  # idle, transcribing, reviewing, translating, translated, dubbing, finished
     target_language = Column(String, default="zh")
+    final_video_url = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 

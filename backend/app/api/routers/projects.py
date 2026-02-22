@@ -60,6 +60,7 @@ async def get_project(project_id: str, db: Session = Depends(get_db)):
         "video_path": str(project.video_path),
         "status": project.status,
         "target_language": project.target_language,
+        "final_video_url": project.final_video_url,
         "segments": [
             {
                 "id": s.id,

@@ -5,7 +5,7 @@ from tqdm import tqdm
 from pathlib import Path
 
 # 路径配置
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parent
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -13,7 +13,10 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 # 使用 HF 镜像加速
 HF_MIRROR = "https://hf-mirror.com"
 GGML_MODELS_BASE = f"{HF_MIRROR}/ggerganov/whisper.cpp/resolve/main"
-VAD_MODEL_GGML_URL = f"{HF_MIRROR}/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin"
+VAD_MODEL_URL = "https://hf-mirror.com/Systran/faster-whisper-large-v3/resolve/main/silero_vad.onnx" # Faster-whisper uses onnx
+# FFmpeg Whisper tutorial mentions:
+# https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/models/for-tests-silero-v5.1.2-ggml.bin
+VAD_MODEL_GGML_URL = "https://github.com/ggml-org/whisper.cpp/raw/master/models/for-tests-silero-v5.1.2-ggml.bin"
 
 def download_file(url: str, dest: Path):
     if dest.exists():
@@ -35,7 +38,7 @@ def download_file(url: str, dest: Path):
             bar.update(size)
 
 def main():
-    model_name = sys.argv[1] if len(sys.argv) > 1 else "large-v3"
+    model_name = sys.argv[1] if len(sys.argv) > 1 else "base"
     
     # 1. 下载 Whisper GGML 模型
     model_file = f"ggml-{model_name}.bin"
@@ -56,8 +59,9 @@ def main():
     except Exception as e:
         print(f"⚠️ 下载 VAD 模型失败 (可选): {e}")
 
-    print(f"\n[DONE] Download complete!")
-    print(f"Models directory: {MODELS_DIR}")
+    print(f"\n✅ 下载完成！")
+    print(f"模型存放目录: {MODELS_DIR}")
+    print(f"FFmpeg 命令示例: ffmpeg -i input.mp4 -af \"whisper=model=models/{model_file}:vad_model=models/ggml-silero-v5.1.2.bin...\"")
 
 if __name__ == "__main__":
     main()

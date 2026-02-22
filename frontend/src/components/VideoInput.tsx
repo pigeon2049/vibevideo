@@ -25,7 +25,7 @@ export const VideoInput: React.FC<VideoInputProps> = ({ onVideoSelected }) => {
         setLoading(true);
         setError(null);
         try {
-            const response = await axios.post(`${API_URL}/download`, {
+            const response = await axios.post(`${API_URL}/api/v1/projects/download`, {
                 url,
                 cookies: cookies || undefined
             });
@@ -47,7 +47,7 @@ export const VideoInput: React.FC<VideoInputProps> = ({ onVideoSelected }) => {
         formData.append('file', file);
 
         try {
-            const response = await axios.post(`${API_URL}/upload`, formData, {
+            const response = await axios.post(`${API_URL}/api/v1/projects/upload`, formData, {
                 headers: {
                     'Content-Type': 'multipart/form-data',
                 },

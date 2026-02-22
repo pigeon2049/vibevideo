@@ -12,6 +12,12 @@ from pydantic import BaseModel
 import uvicorn
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
+import sys
+import asyncio
+
+# Force ProactorEventLoop on Windows for subprocess support
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # 1. 环境初始化
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -47,6 +53,12 @@ app.include_router(transcriber_router)
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 app.mount("/temp", StaticFiles(directory=TEMP_DIR), name="temp")
 
+
+# ==================================================
+# 全局状态管理
+# ==================================================
+active_translation_streams = {} # project_id -> stream_id
+
 # ==================================================
 # 数据模型定义
 # ==================================================
@@ -66,6 +78,9 @@ class TranslateRequest(BaseModel):
     project_id: str
     target_language: str
     context: Optional[List[str]] = []
+
+class UpdateTranslationRequest(BaseModel):
+    text_translated: str
 
 class DubRequest(BaseModel):
     project_id: str
@@ -99,11 +114,16 @@ async def get_project(project_id: str, db: Session = Depends(get_db)):
         for s in project.segments
     ]
     
+    final_filename = f"{project.id}.mp4"
+    final_video_path = os.path.join(OUTPUT_DIR, final_filename)
+    final_video_url = f"/output/{final_filename}" if os.path.exists(final_video_path) else None
+
     return {
         "id": project.id,
         "video_path": project.video_path,
         "status": project.status,
         "target_language": project.target_language,
+        "final_video_url": final_video_url,
         "segments": segments
     }
 
@@ -115,6 +135,13 @@ async def download_video_endpoint(request: DownloadRequest, db: Session = Depend
         # 该操作通常涉及长时间 IO，建议确保 downloader 内部无阻塞或运行在执行器中
         result = downloader.download_video(request.url, request.cookies)
         
+        # 检查是否已存在具有相同 video_path 的项目
+        existing_project = db.query(Project).filter(Project.video_path == result.get("path")).first()
+        if existing_project:
+            print(f"🔄 Resuming existing project: {existing_project.id}")
+            result["project_id"] = existing_project.id
+            return result
+
         # 创建数据库记录
         new_project = Project(
             video_path=result.get("path"),
@@ -162,6 +189,9 @@ async def translate_stream_endpoint(request: TranslateRequest, db: Session = Dep
     """
     print(f"📡 API HIT: /translate-stream | Project: {request.project_id}")
     
+    stream_id = str(uuid.uuid4())
+    active_translation_streams[request.project_id] = stream_id
+    
     try:
         project = db.query(Project).filter(Project.id == request.project_id).first()
         if not project:
@@ -208,7 +238,15 @@ async def translate_stream_endpoint(request: TranslateRequest, db: Session = Dep
                         return None
 
                 while True:
+                    if active_translation_streams.get(request.project_id) != stream_id:
+                        print(f"🛑 Stream cancelled for project {request.project_id} (before chunk)")
+                        break
+                        
                     chunk = await loop.run_in_executor(None, get_next_chunk)
+                    
+                    if active_translation_streams.get(request.project_id) != stream_id:
+                        print(f"🛑 Stream cancelled for project {request.project_id} (after chunk)")
+                        break
                     
                     if chunk is None:
                         break
@@ -218,6 +256,7 @@ async def translate_stream_endpoint(request: TranslateRequest, db: Session = Dep
                         db_segment = stream_db.query(Segment).filter(Segment.id == translated_seg["id"]).first()
                         if db_segment and "text" in translated_seg:
                             db_segment.text_translated = translated_seg["text"]
+                            db_segment.tts_audio_path = None
                     stream_db.commit()
                         
                     yield json.dumps(chunk, ensure_ascii=False) + "\n"
@@ -267,9 +306,11 @@ async def reset_segment_translation(project_id: str, segment_id: str, mode: str 
         ).all()
         for s in segments_to_reset:
             s.text_translated = None
+            s.tts_audio_path = None
     else:
         # Reset just this one
         segment.text_translated = None
+        segment.tts_audio_path = None
     
     # 确保项目的状态允许重新翻译
     project = db.query(Project).filter(Project.id == project_id).first()
@@ -279,9 +320,27 @@ async def reset_segment_translation(project_id: str, segment_id: str, mode: str 
     db.commit()
     return {"status": "success"}
 
+# --- 更新片段翻译 ---
+@app.put("/project/{project_id}/segment/{segment_id}/translation")
+async def update_segment_translation(
+    project_id: str, 
+    segment_id: str, 
+    request: UpdateTranslationRequest, 
+    db: Session = Depends(get_db)
+):
+    segment = db.query(Segment).filter(Segment.project_id == project_id, Segment.id == segment_id).first()
+    if not segment:
+        raise HTTPException(status_code=404, detail="Segment not found")
+        
+    segment.text_translated = request.text_translated
+    segment.tts_audio_path = None
+    db.commit()
+    return {"status": "success", "id": segment.id, "text_translated": segment.text_translated}
+
 # --- 配音合成 ---
 @app.post("/dub")
 async def dub_endpoint(request: DubRequest, db: Session = Depends(get_db)):
+    print(f"📡 API HIT: /dub | Project: {request.project_id}")
     try:
         project = db.query(Project).filter(Project.id == request.project_id).first()
         if not project:
@@ -302,43 +361,150 @@ async def dub_endpoint(request: DubRequest, db: Session = Depends(get_db)):
             for s in all_segments if s.text_translated
         ]
         
-        print(f"🎬 Step 1: Starting TTS for {len(segments_dict)} segments...")
-        segments_with_audio = await tts.generate_speech_for_segments(
-            segments_dict,
-            request.voice
-        )
-        
-        # 将生成的音频路径更新回 DB
-        for s_audio in segments_with_audio:
-            if "audio_file" in s_audio:
-                db_seg = db.query(Segment).filter(Segment.id == s_audio["id"]).first()
-                if db_seg:
-                    db_seg.tts_audio_path = s_audio["audio_file"]
-        db.commit()
+        segments_dict.sort(key=lambda x: x["start"])
+        paragraphs = []
+        if segments_dict:
+            current_para = {
+                "id": f"para_{segments_dict[0]['id']}", 
+                "start": segments_dict[0]["start"], 
+                "end": segments_dict[0]["end"], 
+                "texts": [segments_dict[0]["text"]],
+                "segment_ids": [segments_dict[0]["id"]]
+            }
+            for i in range(1, len(segments_dict)):
+                seg = segments_dict[i]
+                gap = seg["start"] - current_para["end"]
+                
+                last_text = current_para["texts"][-1].strip()
+                ends_with_sentence_break = False
+                if last_text and last_text[-1] in ".。!?！？\n":
+                    ends_with_sentence_break = True
+                    
+                if gap <= 1.0 and not ends_with_sentence_break:
+                    current_para["texts"].append(seg["text"])
+                    current_para["end"] = seg["end"]
+                    current_para["segment_ids"].append(seg["id"])
+                else:
+                    paragraphs.append(current_para)
+                    current_para = {
+                        "id": f"para_{seg['id']}", 
+                        "start": seg["start"], 
+                        "end": seg["end"], 
+                        "texts": [seg["text"]],
+                        "segment_ids": [seg["id"]]
+                    }
+            paragraphs.append(current_para)
 
-        print("🔍 Step 2: Isolating and separating audio layers...")
-        original_audio = audio_processor.isolate_audio(project.video_path)
-        separated = audio_processor.separate_vocals(original_audio)
+        for p in paragraphs:
+            p["text"] = " ".join(p["texts"])
         
-        print("🛠 Step 3: Merging final high-fidelity video...")
-        final_video_path = audio_processor.merge_audio_video(
-            video_path=project.video_path,
-            background_audio=separated["background"],
-            tts_segments=segments_with_audio,
-            bg_volume=request.background_volume
+        async def dub_generator():
+            import hashlib
+            from utils.file_manager import AUDIO_DIR
+            from db.database import SessionLocal
+            stream_db = SessionLocal()
+            try:
+                loop = asyncio.get_event_loop()
+                
+                print(f"🎬 Step 1: Starting TTS for {len(paragraphs)} paragraphs (grouped from {len(segments_dict)} segments)...")
+                initial_paras = [{"id": p["id"], "text": p["text"], "start": p["start"]} for p in paragraphs]
+                yield json.dumps({"step": "tts", "current": 0, "total": len(paragraphs), "paragraphs": initial_paras}) + "\n"
+                
+                paragraphs_with_audio = []
+                for i, para in enumerate(paragraphs):
+                    text = para["text"]
+                    if text.strip():
+                        text_hash = hashlib.md5(f"{text}_{request.voice}".encode()).hexdigest()
+                        audio_path = os.path.join(AUDIO_DIR, f"tts_{text_hash}.mp3")
+                        
+                        if os.path.exists(audio_path):
+                            print(f"⏩ Skipping TTS for paragraph {para['id']}, already exists")
+                        else:
+                            audio_path = await tts.generate_speech(text, request.voice, output_file=audio_path)
+                            
+                        for seg_id in para["segment_ids"]:
+                            db_seg = stream_db.query(Segment).filter(Segment.id == seg_id).first()
+                            if db_seg:
+                                db_seg.tts_audio_path = audio_path
+                        stream_db.commit()
+                                
+                        para["audio_file"] = audio_path
+                    else:
+                        para["audio_file"] = None
+                        
+                    paragraphs_with_audio.append(para)
+                    audio_url = f"/{para['audio_file'].replace(os.sep, '/')}" if para["audio_file"] else None
+                    para_info = {"id": para["id"], "text": para["text"], "start": para["start"], "audio_url": audio_url}
+                    yield json.dumps({"step": "tts", "current": i + 1, "total": len(paragraphs), "paragraph": para_info}) + "\n"
+                
+                print("🔍 Step 2: Isolating and separating audio layers...")
+                yield json.dumps({"step": "isolate"}) + "\n"
+                original_audio = await loop.run_in_executor(None, audio_processor.isolate_audio, project.video_path)
+                
+                yield json.dumps({"step": "separate"}) + "\n"
+                separated = await loop.run_in_executor(None, audio_processor.separate_vocals, original_audio)
+                
+                print("🛠 Step 3: Merging final high-fidelity video...")
+                yield json.dumps({"step": "merge"}) + "\n"
+                
+                # Generate subtitle file
+                from utils.file_manager import generate_srt
+                srt_path = await loop.run_in_executor(None, generate_srt, segments_dict)
+                print(f"📄 Subtitle file generated at: {srt_path}")
+                
+                # Calling merge_audio_video might fail if audio_processor has an incompatible signature. We keep the existing method call since this is what was there.
+                def do_merge():
+                    return audio_processor.merge_audio_video(
+                        video_path=project.video_path,
+                        background_audio=separated["background"],
+                        tts_segments=paragraphs_with_audio,
+                        bg_volume=request.background_volume,
+                        subtitle_path=srt_path
+                    )
+                    
+                temp_final_video_path = await loop.run_in_executor(None, do_merge)
+                
+                # Rename to deterministic path
+                final_filename = f"{request.project_id}.mp4"
+                deterministic_path = os.path.join(OUTPUT_DIR, final_filename)
+                if os.path.exists(deterministic_path):
+                    try:
+                        os.remove(deterministic_path)
+                    except Exception:
+                        pass
+                shutil.move(temp_final_video_path, deterministic_path)
+                
+                proj = stream_db.query(Project).filter(Project.id == request.project_id).first()
+                if proj:
+                    proj.status = "finished"
+                    stream_db.commit()
+                
+                yield json.dumps({
+                    "step": "done",
+                    "video_path": deterministic_path,
+                    "url": f"/output/{final_filename}"
+                }) + "\n"
+                
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                yield json.dumps({"step": "error", "message": str(e)}) + "\n"
+            finally:
+                stream_db.close()
+                
+        return StreamingResponse(
+            dub_generator(),
+            media_type="application/x-ndjson",
+            headers={
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            }
         )
-        
-        project.status = "finished"
-        db.commit()
-
-        return {
-            "video_path": final_video_path,
-            "url": f"/output/{os.path.basename(final_video_path)}"
-        }
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Dubbing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================================================
 # 启动入口
@@ -351,4 +517,5 @@ if __name__ == "__main__":
             os.makedirs(d, exist_ok=True)
         
     print("🔥 Vibe Video Backend is firing up on http://localhost:8000")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # loop="asyncio" + policy setup above ensures windows subprocess support
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, loop="asyncio")

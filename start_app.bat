@@ -2,7 +2,7 @@
 echo Starting Vibe Video...
 
 :: Start Backend
-start "Vibe Video Backend" cmd /k "cd backend && pip install -r requirements.txt && python main.py"
+start "Vibe Video Backend" cmd /k "cd backend && pip install -r requirements.txt && python -m app.main"
 
 :: Start Frontend
 start "Vibe Video Frontend" cmd /k "cd frontend && npm install && npm run dev"

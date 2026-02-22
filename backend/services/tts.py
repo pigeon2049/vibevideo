@@ -4,7 +4,7 @@ from utils.file_manager import AUDIO_DIR, generate_temp_filename
 
 # Voice constants
 VOICE_EN_US = "en-US-AriaNeural"
-VOICE_ZH_CN = "zh-CN-XiaoxiaoNeural"
+VOICE_ZH_CN = "zh-CN-YunxiNeural"
 # Add more as needed
 
 async def generate_speech(text: str, voice: str, output_file: str = None) -> str:

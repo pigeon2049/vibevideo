@@ -43,5 +43,7 @@ models/
 
 # Database files
 backend/data/
+backend/db/*.db
+*.db
 *.sqlite
 *.sqlite3

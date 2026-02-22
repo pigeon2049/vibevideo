@@ -1,5 +1,5 @@
-import React from 'react';
-import { Loader2, Languages, CheckCircle, RotateCcw, ChevronsDown } from 'lucide-react';
+import React, { useState } from 'react';
+import { Loader2, Languages, CheckCircle, RotateCcw, ChevronsDown, Pencil, X, Check } from 'lucide-react';
 import type { Status, Segment } from '../types';
 
 interface TranslationWorkspaceProps {
@@ -10,6 +10,7 @@ interface TranslationWorkspaceProps {
     setTargetLang: (val: string) => void;
     onDub: () => void;
     onRetranslate: (id: string, mode: 'single' | 'all_after') => void;
+    onUpdateTranslation?: (id: string, text: string) => void;
 }
 
 export const TranslationWorkspace: React.FC<TranslationWorkspaceProps> = ({
@@ -19,8 +20,27 @@ export const TranslationWorkspace: React.FC<TranslationWorkspaceProps> = ({
     targetLang,
     setTargetLang,
     onDub,
-    onRetranslate
+    onRetranslate,
+    onUpdateTranslation
 }) => {
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [editText, setEditText] = useState("");
+
+    const startEditing = (id: string, text: string) => {
+        setEditingId(id);
+        setEditText(text);
+    };
+
+    const saveEdit = () => {
+        if (editingId && onUpdateTranslation) {
+            onUpdateTranslation(editingId, editText);
+        }
+        setEditingId(null);
+    };
+
+    const cancelEdit = () => {
+        setEditingId(null);
+    };
     return (
         <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
             <div className="grid grid-cols-2 bg-slate-800 text-slate-200 text-xs font-bold uppercase tracking-widest">
@@ -50,25 +70,57 @@ export const TranslationWorkspace: React.FC<TranslationWorkspaceProps> = ({
                             <div className="p-4">
                                 {trans ? (
                                     <div className="group flex justify-between items-start animate-in fade-in slide-in-from-left-2 duration-500">
-                                        <p className="text-sm font-semibold text-slate-900 pr-2">
-                                            {trans.text}
-                                        </p>
-                                        <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1 flex-shrink-0">
-                                            <button
-                                                title="Retranslate this segment only"
-                                                onClick={() => onRetranslate(s.id, 'single')}
-                                                className="text-slate-400 hover:text-blue-500 p-1 rounded hover:bg-slate-100"
-                                            >
-                                                <RotateCcw size={14} />
-                                            </button>
-                                            <button
-                                                title="Retranslate from here onwards"
-                                                onClick={() => onRetranslate(s.id, 'all_after')}
-                                                className="text-slate-400 hover:text-orange-500 p-1 rounded hover:bg-slate-100"
-                                            >
-                                                <ChevronsDown size={14} />
-                                            </button>
-                                        </div>
+                                        {editingId === s.id ? (
+                                            <div className="flex-1 mr-2">
+                                                <textarea
+                                                    value={editText}
+                                                    onChange={(e) => setEditText(e.target.value)}
+                                                    className="w-full text-sm p-2 border border-blue-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[60px] resize-y"
+                                                    autoFocus
+                                                />
+                                                <div className="flex justify-end gap-2 mt-2">
+                                                    <button onClick={cancelEdit} className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded transition-colors">
+                                                        <X size={12} /> Cancel
+                                                    </button>
+                                                    <button onClick={saveEdit} className="flex items-center gap-1 text-xs bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 transition-colors shadow-sm">
+                                                        <Check size={12} /> Save
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <p
+                                                    className="text-sm font-semibold text-slate-900 pr-2 flex-1 cursor-text hover:bg-slate-100 rounded p-1 -m-1 transition-colors"
+                                                    onClick={() => startEditing(s.id, trans.text)}
+                                                    title="Click to edit translation"
+                                                >
+                                                    {trans.text}
+                                                </p>
+                                                <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1 flex-shrink-0 ml-2">
+                                                    <button
+                                                        title="Edit translation"
+                                                        onClick={() => startEditing(s.id, trans.text)}
+                                                        className="text-slate-400 hover:text-green-500 p-1.5 rounded hover:bg-slate-100 transition-colors"
+                                                    >
+                                                        <Pencil size={14} />
+                                                    </button>
+                                                    <button
+                                                        title="Retranslate this segment only"
+                                                        onClick={() => onRetranslate(s.id, 'single')}
+                                                        className="text-slate-400 hover:text-blue-500 p-1.5 rounded hover:bg-slate-100 transition-colors"
+                                                    >
+                                                        <RotateCcw size={14} />
+                                                    </button>
+                                                    <button
+                                                        title="Retranslate from here onwards"
+                                                        onClick={() => onRetranslate(s.id, 'all_after')}
+                                                        className="text-slate-400 hover:text-orange-500 p-1.5 rounded hover:bg-slate-100 transition-colors"
+                                                    >
+                                                        <ChevronsDown size={14} />
+                                                    </button>
+                                                </div>
+                                            </>
+                                        )}
                                     </div>
                                 ) : (
                                     <div className="space-y-2">

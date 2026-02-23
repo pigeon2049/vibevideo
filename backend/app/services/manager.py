@@ -181,7 +181,7 @@ class ProjectManager:
         paragraphs_with_audio = []
         for i, para in enumerate(paragraphs):
             text = para["text"]
-            if text.strip():
+            if tts_service.is_speakable(text):
                 # generate_speech handles caching internally
                 audio_path = await tts_service.generate_speech(text, voice)
                 para["audio_file"] = audio_path
@@ -193,6 +193,7 @@ class ProjectManager:
                         db_seg.tts_audio_path = audio_path
                 db.commit()
             else:
+                logger.info(f"[MANAGER] Skipping non-speakable paragraph: '{text[:20]}...'")
                 para["audio_file"] = None
             
             paragraphs_with_audio.append(para)

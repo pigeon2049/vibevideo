@@ -59,14 +59,18 @@ class TranslationService:
         return f"""You are a professional video subtitle translator. 
 Target Language: {target_lang}
 
-Context for reference (previous translated sentences):
+CONTEXT FOR REFERENCE (PREVIOUSLY TRANSLATED SENTENCES):
 {context_text}
 
-Task: Translate the following subtitle segments into {target_lang}.
-Requirements:
+TASK: Translate the following subtitle segments into {target_lang}.
+
+STRICT REQUIREMENTS:
 1. Maintain the exact same JSON structure.
 2. Only translate the "text" field.
 3. Return ONLY the JSON list of translated segments.
+4. DO NOT REPEAT ANY TEXT FROM THE CONTEXT in your translation.
+5. Translate each segment naturally based on the flow, but do not include contents that were already provided in the context.
+6. The context is only there to help you understand the story, not to be repeated.
 
 Segments to translate:
 {segments_json}
@@ -115,6 +119,8 @@ Segments to translate:
                 while next_expected_idx in results_map:
                     chunk_res = results_map.pop(next_expected_idx)
                     for seg in chunk_res:
+                        # Deduplicate against previous context
+                        seg['text'] = self._deduplicate_segment(seg.get('text', ''), context_buffer)
                         context_buffer.append(seg.get('text', ''))
                     yield chunk_res
                     next_expected_idx += 1
@@ -130,8 +136,41 @@ Segments to translate:
                 )
                 if translated_chunk:
                     for seg in translated_chunk:
+                        # Deduplicate against previous context
+                        seg['text'] = self._deduplicate_segment(seg.get('text', ''), context_buffer)
                         context_buffer.append(seg.get('text', ''))
                     yield translated_chunk
+
+    def _deduplicate_segment(self, current_text: str, context_buffer: List[str]) -> str:
+        """
+        Removes overlapping repetition from the start of current_text if it mirrors 
+        the end of the previous translations. Works for both English (words) and 
+        Chinese (characters).
+        """
+        if not context_buffer or not current_text:
+            return current_text
+            
+        prev_text = " ".join(context_buffer[-2:]).strip()
+        if not prev_text:
+            return current_text
+            
+        curr = current_text.strip()
+        
+        # Try to find the longest character-based overlap
+        # Check from longest possible overlap down to 4 characters
+        max_overlap_len = min(len(prev_text), len(curr))
+        for length in range(max_overlap_len, 3, -1):
+            overlap_prev = prev_text[-length:]
+            overlap_curr = curr[:length]
+            
+            if overlap_prev.lower() == overlap_curr.lower():
+                logger.info(f"Deduplicating overlap (len {length}): '{overlap_curr}'")
+                new_text = curr[length:].strip()
+                # Remove leading punctuation
+                new_text = re.sub(r'^[，。！？；、,.!?;:\-\s]+', '', new_text).strip()
+                return new_text
+                
+        return current_text
 
     async def _translate_chunk_with_retry(self, chunk, target_lang, context_text, idx, total, max_retries=3):
         attempt = 0

@@ -76,4 +76,6 @@ Python 3.11.8
 
 运行: start_app.bat
 ---
+http://localhost:5173/
+
 当前版本还存在小bug,字幕翻译完后请刷新页面才会出现生成视频的按钮

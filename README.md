@@ -72,3 +72,5 @@ LLM_MODEL1=openai/gpt-oss-120b:free
 Python 3.11.8  其它版本未测试
 
 运行: start_app.bat
+
+当前版本还存在小bug,字幕翻译完后请刷新页面才会出现生成视频的按钮

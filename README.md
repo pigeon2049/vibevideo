@@ -34,7 +34,7 @@ LLM
 ollama pull translategemma:12b
 ```
 
-新建.env
+编辑backend/.env
 ---
 ```
 DEFAULT_VOICE_ZH=zh-CN-YunxiNeural

@@ -68,7 +68,7 @@ LLM_MODEL1=openai/gpt-oss-120b:free
 #LLM_MODEL4=
 
 ```
-v22.16.0
+nodejs v22.16.0
 
 Python 3.11.8  
 

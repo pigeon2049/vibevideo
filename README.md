@@ -1,5 +1,10 @@
 ##自动下载youtube视频并生成翻译和中文语音
 ---
+```
+git clone https://github.com/pigeon2049/vibevideo.git
+cd vibevideo
+```
+
 下载并解压exe到backend\bin
 ---
 https://github.com/yt-dlp/yt-dlp/releases/download/2026.02.04/yt-dlp.exe

@@ -54,25 +54,6 @@ class AudioService:
         model = "htdemucs"
         output_dir = settings.TEMP_DIR / "separated"
         
-        cmd = [
-            "-n", model,
-            "--two-stems=vocals",
-            "-o", str(output_dir),
-            audio_path
-        ]
-        
-        logger.info(f"Running Demucs on {audio_path}")
-        process = await asyncio.create_subprocess_exec(
-            "demucs", *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            logger.error(f"Demucs error: {stderr.decode()}")
-            # Fallback will handle it
-        
         filename = Path(audio_path).stem
         base_dir = output_dir / model / filename
         
@@ -81,9 +62,43 @@ class AudioService:
             "background": str(base_dir / "no_vocals.wav")
         }
         
-        if not os.path.exists(results["background"]):
-            logger.error(f"Demucs output not found at {results['background']}")
+        # Check if already separated
+        if os.path.exists(results["background"]) and os.path.exists(results["vocals"]):
+            logger.info(f"Using cached separated audio from {base_dir}")
+            return results
+
+        cmd = [
+            "-n", model,
+            "--two-stems=vocals",
+            "-o", str(output_dir),
+            audio_path
+        ]
+        
+        # Try to find demucs absolute path on Windows
+        executable = "demucs"
+        if os.name == "nt":
+            # We already found it earlier at: C:\Users\zhang\AppData\Local\Programs\Python\Python311\Scripts\demucs.exe
+            # But let's be generic or check common locations
+            common_scripts = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python311\Scripts\demucs.exe")
+            if os.path.exists(common_scripts):
+                executable = common_scripts
+
+        logger.info(f"Running Demucs on {audio_path} using {executable}")
+        process = await asyncio.create_subprocess_exec(
+            executable, *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            err_msg = stderr.decode()
+            logger.error(f"Demucs error: {err_msg}")
             # Fallback: if separation fails, use the original audio as background (not ideal but better than crashing)
+            # However, we should only return this if the files truly don't exist
+            
+        if not os.path.exists(results["background"]):
+            logger.warning(f"Demucs output not found at {results['background']}, using original audio as fallback")
             return {"vocals": audio_path, "background": audio_path}
             
         return results

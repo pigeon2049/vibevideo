@@ -71,8 +71,8 @@ STRICT REQUIREMENTS:
 2. Only translate the "text" field.
 3. Return ONLY the JSON list of translated segments.
 4. DO NOT REPEAT ANY TEXT FROM THE CONTEXT in your translation.
-5. Translate each segment naturally based on the flow, but do not include contents that were already provided in the context.
-6. The context is only there to help you understand the story, not to be repeated.
+7. DO NOT add any trailing connectives or "bridge" words at the end of a segment (e.g., "它...", "并在...", "而是...") just to connect to the next segment. Each segment must be a clean translation of its source.
+8. The context is only there to help you understand the story, not to be repeated.
 
 Segments to translate:
 {segments_json}
@@ -103,9 +103,40 @@ STRICT REQUIREMENTS:
 2. Maintain the same JSON structure as the input.
 3. Only modify the "text" field if it can be improved.
 4. DO NOT REPEAT ANY TEXT FROM THE CONTEXT.
-5. If the initial translation is already perfect, return it as is but still in the same JSON format.
+5. DO NOT add any trailing connectives, pronouns, or ellipses at the end of segments to link them to the next segment.
+6. If the initial translation is already perfect, return it as is but still in the same JSON format.
 
 Improved Translation:
+"""
+
+    def _build_coherence_prompt(self, target_lang: str, video_title: str, context_text: str, current_segments: List[Dict], video_summary: str = "") -> str:
+        segments_json = json.dumps(current_segments, ensure_ascii=False)
+        summary_section = f"\nVIDEO CONTEXT/SUMMARY:\n{video_summary}\n" if video_summary else ""
+        
+        # Extract the very last bit of context to emphasize the connection
+        last_context = context_text[-100:] if len(context_text) > 100 else context_text
+        
+        return f"""You are a translation coherence expert. Your task is to ensure the translation flows naturally from the previous context.
+Video Title: {video_title}{summary_section}
+Target Language: {target_lang}
+
+PREVIOUS CONTEXT (ENDING):
+...{last_context}
+
+CURRENT TRANSLATED SEGMENTS:
+{segments_json}
+
+TASK: Review the first segment of the CURRENT TRANSLATED SEGMENTS and ensure it connects perfectly with the ending of the PREVIOUS CONTEXT. 
+If a sentence was previously cut off, ensure it completes naturally. If the tone or subject changed abruptly, fix it.
+
+STRICT REQUIREMENTS:
+1. Return ONLY the JSON list of segments.
+2. Only modify the "text" field for coherence.
+3. DO NOT REPEAT ANY TEXT FROM THE CONTEXT.
+4. DO NOT add any bridge words (like "它...", "并在...") at the end of segments. Ensure each segment ends where the source idea ends.
+5. If it already flows perfectly, return the input exactly.
+
+Coherent Translation:
 """
 
     async def translate_segments_stream(
@@ -191,9 +222,13 @@ Improved Translation:
         curr = current_text.strip()
         
         # Try to find the longest character-based overlap
-        # Check from longest possible overlap down to 4 characters
+        # Check from longest possible overlap down to threshold
+        # In Chinese, even 1-2 character overlaps (like pronouns "它", "其") are significant
+        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in curr + prev_text)
+        min_overlap = 2 if has_chinese else 4
+        
         max_overlap_len = min(len(prev_text), len(curr))
-        for length in range(max_overlap_len, 3, -1):
+        for length in range(max_overlap_len, min_overlap - 1, -1):
             overlap_prev = prev_text[-length:]
             overlap_curr = curr[:length]
             
@@ -236,7 +271,7 @@ Improved Translation:
                     attempt += 1
                     continue
 
-                # 2. Review and Improve
+                # 2. Content Review and Improvement
                 logger.info(f"Reviewing translation for chunk {idx}/{total} with {provider['name']}")
                 review_response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
                     model=model,
@@ -251,11 +286,30 @@ Improved Translation:
                 review_content = review_response.choices[0].message.content.strip()
                 reviewed_chunk = self._parse_json_response(review_content)
                 
-                if self._validate_translation(chunk, reviewed_chunk, target_lang, review_content):
-                    return reviewed_chunk
+                if not self._validate_translation(chunk, reviewed_chunk, target_lang, review_content):
+                    logger.warning(f"Review translation validation failed for chunk {idx}, using initial...")
+                    reviewed_chunk = initial_translated_chunk
+
+                # 3. Coherence Check (Bridge previous context and current chunk)
+                logger.info(f"Checking coherence for chunk {idx}/{total} with {provider['name']}")
+                coherence_response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You are a coherence expert. Output valid JSON array ONLY."},
+                        {"role": "user", "content": self._build_coherence_prompt(target_lang, video_title, context_text, reviewed_chunk, video_summary=video_summary)}
+                    ],
+                    temperature=0.1,
+                    timeout=300
+                ))
                 
-                # If review failed but initial was okay, return initial
-                return initial_translated_chunk
+                coherence_content = coherence_response.choices[0].message.content.strip()
+                final_chunk = self._parse_json_response(coherence_content)
+                
+                if self._validate_translation(chunk, final_chunk, target_lang, coherence_content):
+                    return final_chunk
+                
+                # If coherence failed, return reviewed
+                return reviewed_chunk
                 
             except Exception as e:
                 logger.error(f"Error in translation chunk {idx}: {e}")

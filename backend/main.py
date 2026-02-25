@@ -463,17 +463,15 @@ async def dub_endpoint(request: DubRequest, db: Session = Depends(get_db)):
                 srt_path = await loop.run_in_executor(None, generate_srt, segments_dict)
                 print(f"📄 Subtitle file generated at: {srt_path}")
                 
-                # Calling merge_audio_video might fail if audio_processor has an incompatible signature. We keep the existing method call since this is what was there.
-                def do_merge():
-                    return audio_processor.merge_audio_video(
-                        video_path=project.video_path,
-                        background_audio=separated["background"],
-                        tts_segments=paragraphs_with_audio,
-                        bg_volume=request.background_volume,
-                        subtitle_path=srt_path
-                    )
-                    
-                temp_final_video_path = await loop.run_in_executor(None, do_merge)
+                # FIX: merge_audio_video is an async function, should be awaited directly,
+                # NOT run in an executor (which would just return the coroutine object).
+                temp_final_video_path = await audio_processor.merge_audio_video(
+                    video_path=project.video_path,
+                    background_audio=separated["background"],
+                    tts_segments=paragraphs_with_audio,
+                    bg_volume=request.background_volume,
+                    subtitle_path=srt_path
+                )
                 
                 # Rename to deterministic path
                 final_filename = f"{request.project_id}.mp4"

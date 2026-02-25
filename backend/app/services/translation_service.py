@@ -54,9 +54,10 @@ class TranslationService:
         else: # priority
             return self.providers[attempt % len(self.providers)]
 
-    def _build_prompt(self, target_lang: str, context_text: str, current_segments: List[Dict]) -> str:
+    def _build_prompt(self, target_lang: str, video_title: str, context_text: str, current_segments: List[Dict]) -> str:
         segments_json = json.dumps(current_segments, ensure_ascii=False)
         return f"""You are a professional video subtitle translator. 
+Video Title: {video_title}
 Target Language: {target_lang}
 
 CONTEXT FOR REFERENCE (PREVIOUSLY TRANSLATED SENTENCES):
@@ -76,10 +77,40 @@ Segments to translate:
 {segments_json}
 """
 
+    def _build_review_prompt(self, target_lang: str, video_title: str, context_text: str, original_segments: List[Dict], translated_segments: List[Dict]) -> str:
+        original_json = json.dumps(original_segments, ensure_ascii=False)
+        translated_json = json.dumps(translated_segments, ensure_ascii=False)
+        return f"""You are a translation reviewer. Your task is to review and improve the translation of video subtitles.
+Video Title: {video_title}
+Target Language: {target_lang}
+
+CONTEXT FOR REFERENCE (PREVIOUSLY TRANSLATED SENTENCES):
+{context_text}
+
+ORIGINAL SEGMENTS:
+{original_json}
+
+INITIAL TRANSLATION:
+{translated_json}
+
+GOAL: Review the INITIAL TRANSLATION and improve it. 
+Ensure the translation is natural, contextually accurate, and consistent with the video title and previous context.
+
+STRICT REQUIREMENTS:
+1. Return ONLY the improved JSON list of translated segments.
+2. Maintain the same JSON structure as the input.
+3. Only modify the "text" field if it can be improved.
+4. DO NOT REPEAT ANY TEXT FROM THE CONTEXT.
+5. If the initial translation is already perfect, return it as is but still in the same JSON format.
+
+Improved Translation:
+"""
+
     async def translate_segments_stream(
         self, 
         segments: List[Dict], 
         target_language: str, 
+        video_title: str = "Unknown Video",
         history_context: List[str] = [], 
         chunk_size: int = 5
     ):
@@ -101,10 +132,10 @@ Segments to translate:
 
             async def process_one_chunk(idx, chunk_data):
                 nonlocal next_expected_idx
-                # Capture current context snapshot for this chunk
-                context_text = " ".join(context_buffer[-8:])
+                # Capture current context snapshot for this chunk - use more context
+                context_text = " ".join(context_buffer[-15:])
                 translated = await self._translate_chunk_with_retry(
-                    chunk_data, target_language, context_text, idx, total_chunks
+                    chunk_data, target_language, video_title, context_text, idx, total_chunks
                 )
                 return idx, translated
 
@@ -129,10 +160,10 @@ Segments to translate:
             for i in range(0, len(segments), chunk_size):
                 chunk_idx = i // chunk_size + 1
                 chunk = segments[i : i + chunk_size]
-                context_text = " ".join(context_buffer[-8:])
+                context_text = " ".join(context_buffer[-15:])
                 
                 translated_chunk = await self._translate_chunk_with_retry(
-                    chunk, target_language, context_text, chunk_idx, total_chunks
+                    chunk, target_language, video_title, context_text, chunk_idx, total_chunks
                 )
                 if translated_chunk:
                     for seg in translated_chunk:
@@ -172,7 +203,7 @@ Segments to translate:
                 
         return current_text
 
-    async def _translate_chunk_with_retry(self, chunk, target_lang, context_text, idx, total, max_retries=3):
+    async def _translate_chunk_with_retry(self, chunk, target_lang, video_title, context_text, idx, total, max_retries=3):
         attempt = 0
         while attempt < max_retries:
             provider = self.get_provider(attempt=attempt)
@@ -183,21 +214,45 @@ Segments to translate:
             
             try:
                 loop = asyncio.get_running_loop()
+                # 1. Initial Translation
                 response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
                     model=model,
                     messages=[
                         {"role": "system", "content": "You are a specialized translator. Output valid JSON array ONLY."},
-                        {"role": "user", "content": self._build_prompt(target_lang, context_text, chunk)}
+                        {"role": "user", "content": self._build_prompt(target_lang, video_title, context_text, chunk)}
                     ],
                     temperature=0.3,
                     timeout=180
                 ))
                 
                 content = response.choices[0].message.content.strip()
-                translated_chunk = self._parse_json_response(content)
+                initial_translated_chunk = self._parse_json_response(content)
                 
-                if self._validate_translation(chunk, translated_chunk, target_lang, content):
-                    return translated_chunk
+                if not self._validate_translation(chunk, initial_translated_chunk, target_lang, content):
+                    logger.warning(f"Initial translation validation failed for chunk {idx}, retry...")
+                    attempt += 1
+                    continue
+
+                # 2. Review and Improve
+                logger.info(f"Reviewing translation for chunk {idx}/{total} with {provider['name']}")
+                review_response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You are a translation reviewer. Output valid JSON array ONLY."},
+                        {"role": "user", "content": self._build_review_prompt(target_lang, video_title, context_text, chunk, initial_translated_chunk)}
+                    ],
+                    temperature=0.2,
+                    timeout=300
+                ))
+                
+                review_content = review_response.choices[0].message.content.strip()
+                reviewed_chunk = self._parse_json_response(review_content)
+                
+                if self._validate_translation(chunk, reviewed_chunk, target_lang, review_content):
+                    return reviewed_chunk
+                
+                # If review failed but initial was okay, return initial
+                return initial_translated_chunk
                 
             except Exception as e:
                 logger.error(f"Error in translation chunk {idx}: {e}")

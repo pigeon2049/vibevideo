@@ -198,7 +198,7 @@ async def translate_stream_endpoint(request: TranslateRequest, db: Session = Dep
         # 提取未翻译的片段，每次最多处理 20 个（可配置）
         segments_to_translate = db.query(Segment).filter(
             Segment.project_id == request.project_id,
-            Segment.text_translated == None
+            (Segment.text_translated == None) | (Segment.text_translated == "")
         ).order_by(Segment.start_time).limit(20).all()
         
         if not segments_to_translate:
@@ -312,7 +312,7 @@ async def reset_segment_translation(project_id: str, segment_id: str, mode: str 
     
     # 确保项目的状态允许重新翻译
     project = db.query(Project).filter(Project.id == project_id).first()
-    if project and project.status == "translated":
+    if project and project.status in ["translated", "finished", "dubbing"]:
         project.status = "reviewing"
         
     db.commit()

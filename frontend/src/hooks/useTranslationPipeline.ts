@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import type { Status, Segment } from '../types';
 
@@ -15,7 +15,7 @@ export function useTranslationPipeline() {
     const [dubbingProgress, setDubbingProgress] = useState<{ step: string, current?: number, total?: number } | null>(null);
     const [dubbingParagraphs, setDubbingParagraphs] = useState<any[]>([]);
 
-    const isProcessingRef = useRef<boolean>(false);
+    const [isProcessing, setIsProcessing] = useState<boolean>(false);
 
     const restoreProject = useCallback(async (id: string) => {
         try {
@@ -36,7 +36,7 @@ export function useTranslationPipeline() {
                 id: s.id, start: s.start, end: s.end, text: s.text
             })));
             setTranslatedSegments(data.segments
-                .filter((s: any) => s.text_translated)
+                .filter((s: any) => s.text_translated !== null && s.text_translated !== undefined && s.text_translated !== "")
                 .map((s: any) => ({
                     id: s.id, start: s.start, end: s.end, text: s.text_translated
                 })));
@@ -69,11 +69,12 @@ export function useTranslationPipeline() {
     };
 
     const processTranslationQueue = useCallback(async () => {
-        if (isProcessingRef.current || !projectId) return;
+        if (isProcessing || !projectId) return;
         const pendingCount = segments.length - translatedSegments.length;
-        if (pendingCount === 0) return;
+        if (pendingCount <= 0) return;
 
-        isProcessingRef.current = true;
+        console.log(`[Translation] Starting queue process. Project: ${projectId}, Pending: ${pendingCount}`);
+        setIsProcessing(true);
         try {
             const res = await fetch(`${API_BASE_URL}/translate-stream`, {
                 method: 'POST',
@@ -88,11 +89,13 @@ export function useTranslationPipeline() {
             const reader = res.body?.getReader();
             const decoder = new TextDecoder();
             let buffer = "";
+            let receivedAny = false;
 
             if (reader) {
                 while (true) {
                     const { value, done } = await reader.read();
                     if (done) break;
+                    receivedAny = true;
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split('\n');
                     buffer = lines.pop() || "";
@@ -110,21 +113,31 @@ export function useTranslationPipeline() {
                     }
                 }
             }
+
+            // If we received an empty stream, it means backend thinks it's done. 
+            // We should sync up or stop looping.
+            if (!receivedAny) {
+                console.warn("[Translation] Received empty stream from server. Syncing project state...");
+                await restoreProject(projectId);
+            }
         } catch (e) {
             console.error("Translation error:", e);
         } finally {
-            isProcessingRef.current = false;
+            setIsProcessing(false);
         }
-    }, [projectId, segments.length, translatedSegments, targetLang]);
+    }, [projectId, segments.length, translatedSegments.length, targetLang, isProcessing, restoreProject]);
 
     useEffect(() => {
-        if (['reviewing', 'translating'].includes(status)) {
-            processTranslationQueue();
+        if (['reviewing', 'translating', 'translated'].includes(status) && !isProcessing && segments.length > 0) {
+            const hasWork = segments.length > translatedSegments.length;
+            if (hasWork) {
+                if (status === 'translated') setStatus('reviewing');
+                processTranslationQueue();
+            } else if (status === 'translating' || status === 'reviewing') {
+                setStatus('translated');
+            }
         }
-        if (segments.length > 0 && segments.length === translatedSegments.length && status === 'translating') {
-            setStatus('translated');
-        }
-    }, [segments.length, translatedSegments.length, status, processTranslationQueue]);
+    }, [segments.length, translatedSegments.length, status, isProcessing, processTranslationQueue]);
 
     const handleDub = async (voice: string = 'default') => {
         setStatus('dubbing');
@@ -183,7 +196,7 @@ export function useTranslationPipeline() {
             } else {
                 restoreProject(projectId);
             }
-            if (status === 'translated') setStatus('reviewing');
+            if (['translated', 'finished'].includes(status)) setStatus('reviewing');
         } catch (err) {
             console.error("Failed to reset segment translation", err);
         }

@@ -78,17 +78,25 @@ class ProjectManager:
         project.target_language = target_lang
         db.commit()
 
+        from sqlalchemy import or_
         untranslated = db.query(Segment).filter(
             Segment.project_id == project_id,
-            Segment.text_translated == None
+            or_(Segment.text_translated == None, Segment.text_translated == "")
         ).order_by(Segment.start_time).all()
+
+        if not untranslated:
+            if project.status in ["translating", "reviewing"]:
+                project.status = "translated"
+                db.commit()
+            return
 
         segments_data = [
             {"id": s.id, "start": s.start_time, "end": s.end_time, "text": s.text_original}
             for s in untranslated
         ]
 
-        async for chunk in translation_service.translate_segments_stream(segments_data, target_lang):
+        video_title = os.path.basename(project.video_path)
+        async for chunk in translation_service.translate_segments_stream(segments_data, target_lang, video_title=video_title):
             for translated_seg in chunk:
                 db_seg = db.query(Segment).filter(Segment.id == translated_seg["id"]).first()
                 if db_seg:
@@ -96,10 +104,9 @@ class ProjectManager:
             db.commit()
             yield chunk
 
-        # Check if all done
         remaining = db.query(Segment).filter(
             Segment.project_id == project_id,
-            Segment.text_translated == None
+            or_(Segment.text_translated == None, Segment.text_translated == "")
         ).count()
         
         if remaining == 0:

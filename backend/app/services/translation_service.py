@@ -54,10 +54,11 @@ class TranslationService:
         else: # priority
             return self.providers[attempt % len(self.providers)]
 
-    def _build_prompt(self, target_lang: str, video_title: str, context_text: str, current_segments: List[Dict]) -> str:
+    def _build_prompt(self, target_lang: str, video_title: str, context_text: str, current_segments: List[Dict], video_summary: str = "") -> str:
         segments_json = json.dumps(current_segments, ensure_ascii=False)
+        summary_section = f"\nVIDEO CONTEXT/SUMMARY:\n{video_summary}\n" if video_summary else ""
         return f"""You are a professional video subtitle translator. 
-Video Title: {video_title}
+Video Title: {video_title}{summary_section}
 Target Language: {target_lang}
 
 CONTEXT FOR REFERENCE (PREVIOUSLY TRANSLATED SENTENCES):
@@ -77,11 +78,12 @@ Segments to translate:
 {segments_json}
 """
 
-    def _build_review_prompt(self, target_lang: str, video_title: str, context_text: str, original_segments: List[Dict], translated_segments: List[Dict]) -> str:
+    def _build_review_prompt(self, target_lang: str, video_title: str, context_text: str, original_segments: List[Dict], translated_segments: List[Dict], video_summary: str = "") -> str:
         original_json = json.dumps(original_segments, ensure_ascii=False)
         translated_json = json.dumps(translated_segments, ensure_ascii=False)
+        summary_section = f"\nVIDEO CONTEXT/SUMMARY:\n{video_summary}\n" if video_summary else ""
         return f"""You are a translation reviewer. Your task is to review and improve the translation of video subtitles.
-Video Title: {video_title}
+Video Title: {video_title}{summary_section}
 Target Language: {target_lang}
 
 CONTEXT FOR REFERENCE (PREVIOUSLY TRANSLATED SENTENCES):
@@ -112,7 +114,8 @@ Improved Translation:
         target_language: str, 
         video_title: str = "Unknown Video",
         history_context: List[str] = [], 
-        chunk_size: int = 5
+        chunk_size: int = 5,
+        video_summary: str = ""
     ):
         context_buffer = history_context.copy()
         total_chunks = (len(segments) + chunk_size - 1) // chunk_size
@@ -135,7 +138,7 @@ Improved Translation:
                 # Capture current context snapshot for this chunk - use more context
                 context_text = " ".join(context_buffer[-15:])
                 translated = await self._translate_chunk_with_retry(
-                    chunk_data, target_language, video_title, context_text, idx, total_chunks
+                    chunk_data, target_language, video_title, context_text, idx, total_chunks, video_summary=video_summary
                 )
                 return idx, translated
 
@@ -163,7 +166,7 @@ Improved Translation:
                 context_text = " ".join(context_buffer[-15:])
                 
                 translated_chunk = await self._translate_chunk_with_retry(
-                    chunk, target_language, video_title, context_text, chunk_idx, total_chunks
+                    chunk, target_language, video_title, context_text, chunk_idx, total_chunks, video_summary=video_summary
                 )
                 if translated_chunk:
                     for seg in translated_chunk:
@@ -203,7 +206,7 @@ Improved Translation:
                 
         return current_text
 
-    async def _translate_chunk_with_retry(self, chunk, target_lang, video_title, context_text, idx, total, max_retries=3):
+    async def _translate_chunk_with_retry(self, chunk, target_lang, video_title, context_text, idx, total, max_retries=3, video_summary=""):
         attempt = 0
         while attempt < max_retries:
             provider = self.get_provider(attempt=attempt)
@@ -219,7 +222,7 @@ Improved Translation:
                     model=model,
                     messages=[
                         {"role": "system", "content": "You are a specialized translator. Output valid JSON array ONLY."},
-                        {"role": "user", "content": self._build_prompt(target_lang, video_title, context_text, chunk)}
+                        {"role": "user", "content": self._build_prompt(target_lang, video_title, context_text, chunk, video_summary=video_summary)}
                     ],
                     temperature=0.3,
                     timeout=180
@@ -239,7 +242,7 @@ Improved Translation:
                     model=model,
                     messages=[
                         {"role": "system", "content": "You are a translation reviewer. Output valid JSON array ONLY."},
-                        {"role": "user", "content": self._build_review_prompt(target_lang, video_title, context_text, chunk, initial_translated_chunk)}
+                        {"role": "user", "content": self._build_review_prompt(target_lang, video_title, context_text, chunk, initial_translated_chunk, video_summary=video_summary)}
                     ],
                     temperature=0.2,
                     timeout=300
@@ -303,6 +306,41 @@ Improved Translation:
                 return False
                 
         return True
+
+    async def summarize_video_description(self, description: str, target_lang: str) -> str:
+        if not description or len(description.strip()) < 10:
+            return ""
+            
+        provider = self.get_provider(attempt=0)
+        client = provider["client"]
+        model = provider["model"]
+        
+        prompt = f"""Summarize the following video description into a concise paragraph (max 200 words) in {target_lang}.
+Focus on:
+1. The main topic/theme.
+2. Key terminology or specialized names mentioned.
+3. The overall tone.
+
+Video Description:
+{description}
+
+Summary:"""
+
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that summarizes video metadata to provide context for translators."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=500
+            ))
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error(f"Error summarizing description: {e}")
+            return ""
 
 translation_service = TranslationService()
 

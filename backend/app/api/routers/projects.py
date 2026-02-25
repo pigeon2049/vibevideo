@@ -23,7 +23,7 @@ class DownloadRequest(BaseModel):
 async def download_video(request: DownloadRequest, db: Session = Depends(get_db)):
     try:
         info = await downloader_service.download(request.url, request.cookies)
-        project = project_manager.create_project(db, info["path"])
+        project = project_manager.create_project(db, info["path"], description=info.get("description"))
         return {
             "project_id": project.id,
             "title": info["title"],

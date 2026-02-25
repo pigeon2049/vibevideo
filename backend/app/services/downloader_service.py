@@ -95,7 +95,8 @@ class DownloaderService:
                                 "duration": video_info.get("duration", 0),
                                 "path": os.path.abspath(existing_path),
                                 "thumbnail": video_info.get("thumbnail"),
-                                "id": video_id
+                                "id": video_id,
+                                "description": video_info.get("description", "")
                             }
             else:
                 logger.warning(f"Could not fetch video info: {stderr}")
@@ -157,7 +158,8 @@ class DownloaderService:
                         "duration": info.get("duration", 0),
                         "path": os.path.abspath(info.get("_filename")),
                         "thumbnail": info.get("thumbnail"),
-                        "id": info.get("id")
+                        "id": info.get("id"),
+                        "description": info.get("description", "")
                     }
                 last_error = err
                 logger.warning(f"Client {client or 'default'} failed: {err[:200]}")
@@ -201,7 +203,8 @@ class DownloaderService:
                             "duration": info.get("duration", 0),
                             "path": os.path.abspath(info.get("_filename")),
                             "thumbnail": info.get("thumbnail"),
-                            "id": info.get("id")
+                            "id": info.get("id"),
+                            "description": info.get("description", "")
                         }
 
             raise Exception(f"Download failed after all attempts. Last error: {last_error}")

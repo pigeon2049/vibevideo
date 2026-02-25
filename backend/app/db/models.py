@@ -13,6 +13,8 @@ class Project(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     video_path = Column(String, index=True)
     status = Column(String, default="idle")  # idle, transcribing, reviewing, translating, translated, dubbing, finished
+    video_description = Column(Text, nullable=True)
+    video_summary = Column(Text, nullable=True)
     target_language = Column(String, default="zh")
     final_video_url = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

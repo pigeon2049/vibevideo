@@ -20,13 +20,16 @@ class ProjectManager:
     def get_project(self, db: Session, project_id: str) -> Optional[Project]:
         return db.query(Project).filter(Project.id == project_id).first()
 
-    def create_project(self, db: Session, video_path: str) -> Project:
+    def create_project(self, db: Session, video_path: str, description: str = None) -> Project:
         # Check for existing project with same video path
         existing = db.query(Project).filter(Project.video_path == video_path).first()
         if existing:
+            if description and not existing.video_description:
+                existing.video_description = description
+                db.commit()
             return existing
             
-        project = Project(video_path=video_path, status="idle")
+        project = Project(video_path=video_path, video_description=description, status="idle")
         db.add(project)
         db.commit()
         db.refresh(project)
@@ -96,7 +99,22 @@ class ProjectManager:
         ]
 
         video_title = os.path.basename(project.video_path)
-        async for chunk in translation_service.translate_segments_stream(segments_data, target_lang, video_title=video_title):
+        
+        # Handle video summary if description exists
+        if not project.video_summary and project.video_description:
+            logger.info(f"Generating summary for project {project_id}...")
+            summary = await translation_service.summarize_video_description(project.video_description, target_lang)
+            if summary:
+                project.video_summary = summary
+                db.commit()
+                logger.info(f"Summary generated: {summary[:100]}...")
+
+        async for chunk in translation_service.translate_segments_stream(
+            segments_data, 
+            target_lang, 
+            video_title=video_title,
+            video_summary=project.video_summary or ""
+        ):
             for translated_seg in chunk:
                 db_seg = db.query(Segment).filter(Segment.id == translated_seg["id"]).first()
                 if db_seg:

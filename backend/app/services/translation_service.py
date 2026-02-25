@@ -109,34 +109,42 @@ STRICT REQUIREMENTS:
 Improved Translation:
 """
 
-    def _build_coherence_prompt(self, target_lang: str, video_title: str, context_text: str, current_segments: List[Dict], video_summary: str = "") -> str:
-        segments_json = json.dumps(current_segments, ensure_ascii=False)
+    def _build_coherence_prompt(self, target_lang: str, video_title: str, context_segments: List[Dict], current_segments: List[Dict], video_summary: str = "") -> str:
+        current_json = json.dumps(current_segments, ensure_ascii=False)
+        context_json = json.dumps(context_segments[-3:], ensure_ascii=False) if context_segments else "[]"
         summary_section = f"\nVIDEO CONTEXT/SUMMARY:\n{video_summary}\n" if video_summary else ""
         
-        # Extract the very last bit of context to emphasize the connection
-        last_context = context_text[-100:] if len(context_text) > 100 else context_text
-        
-        return f"""You are a translation coherence expert. Your task is to ensure the translation flows naturally from the previous context.
+        return f"""You are a translation coherence expert. Your task is to ensure the translation flows naturally and correct any fundamental errors in previous segments based on new information.
 Video Title: {video_title}{summary_section}
 Target Language: {target_lang}
 
-PREVIOUS CONTEXT (ENDING):
-...{last_context}
+RECENT CONTEXT (LAST 3 TRANSLATED SEGMENTS):
+{context_json}
 
-CURRENT TRANSLATED SEGMENTS:
-{segments_json}
+CURRENT TRANSLATED CHUNK (JUST COMPLETED):
+{current_json}
 
-TASK: Review the first segment of the CURRENT TRANSLATED SEGMENTS and ensure it connects perfectly with the ending of the PREVIOUS CONTEXT. 
-If a sentence was previously cut off, ensure it completes naturally. If the tone or subject changed abruptly, fix it.
+TASK: 
+1. Review the CURRENT TRANSLATED CHUNK to ensure it connects perfectly with the RECENT CONTEXT.
+2. If you find a fundamental issue in a segment from the RECENT CONTEXT (e.g., a person's name was wrong, a sentence was cut off poorly, or the tone is inconsistent), you MUST suggest a correction for that previous segment.
+3. Each segment must be a clean translation. Do not add bridge words (like "它...", "并在...") at the end of segments.
 
 STRICT REQUIREMENTS:
-1. Return ONLY the JSON list of segments.
-2. Only modify the "text" field for coherence.
-3. DO NOT REPEAT ANY TEXT FROM THE CONTEXT.
-4. DO NOT add any bridge words (like "它...", "并在...") at the end of segments. Ensure each segment ends where the source idea ends.
-5. If it already flows perfectly, return the input exactly.
+1. Return a JSON object with two fields:
+   "current_chunk": The (possibly improved) list of segments from the CURRENT TRANSLATED CHUNK.
+   "corrections": A list of segments from the RECENT CONTEXT that need updating. If none, return an empty list [].
+2. Maintain the exact same JSON structure for segments.
+3. Only modify the "text" field.
+4. DO NOT REPEAT ANY TEXT FROM THE CONTEXT in the "current_chunk" translations.
+5. If everything is perfect, return the input segments in "current_chunk" and [] in "corrections".
 
-Coherent Translation:
+Example Output:
+{{
+  "current_chunk": [{{ "id": "seg4", "text": "..." }}, ...],
+  "corrections": [{{ "id": "seg3", "text": "Corrected text for seg3" }}]
+}}
+
+Coherent Review:
 """
 
     async def translate_segments_stream(
@@ -144,11 +152,11 @@ Coherent Translation:
         segments: List[Dict], 
         target_language: str, 
         video_title: str = "Unknown Video",
-        history_context: List[str] = [], 
+        history_segments: List[Dict] = [], 
         chunk_size: int = 5,
         video_summary: str = ""
     ):
-        context_buffer = history_context.copy()
+        context_segments = history_segments.copy()
         total_chunks = (len(segments) + chunk_size - 1) // chunk_size
         
         logger.info(f"Starting translation: {len(segments)} segments in {total_chunks} chunks. Strategy: {self.strategy}")
@@ -166,12 +174,11 @@ Coherent Translation:
 
             async def process_one_chunk(idx, chunk_data):
                 nonlocal next_expected_idx
-                # Capture current context snapshot for this chunk - use more context
-                context_text = " ".join(context_buffer[-15:])
-                translated = await self._translate_chunk_with_retry(
-                    chunk_data, target_language, video_title, context_text, idx, total_chunks, video_summary=video_summary
+                # Pass segments for context
+                translated_result = await self._translate_chunk_with_retry(
+                    chunk_data, target_language, video_title, context_segments, idx, total_chunks, video_summary=video_summary
                 )
-                return idx, translated
+                return idx, translated_result
 
             # Launch all tasks
             tasks = [process_one_chunk(idx, chunk) for idx, chunk in all_chunks]
@@ -182,11 +189,19 @@ Coherent Translation:
                 
                 # Yield in order
                 while next_expected_idx in results_map:
-                    chunk_res = results_map.pop(next_expected_idx)
+                    result = results_map.pop(next_expected_idx)
+                    chunk_res = result["chunk"]
+                    corrections = result["corrections"]
+                    
+                    # Yield corrections first
+                    if corrections:
+                        yield corrections
+
                     for seg in chunk_res:
                         # Deduplicate against previous context
-                        seg['text'] = self._deduplicate_segment(seg.get('text', ''), context_buffer)
-                        context_buffer.append(seg.get('text', ''))
+                        context_texts = [s.get('text', '') for s in context_segments[-15:]]
+                        seg['text'] = self._deduplicate_segment(seg.get('text', ''), context_texts)
+                        context_segments.append(seg)
                     yield chunk_res
                     next_expected_idx += 1
         else:
@@ -194,17 +209,22 @@ Coherent Translation:
             for i in range(0, len(segments), chunk_size):
                 chunk_idx = i // chunk_size + 1
                 chunk = segments[i : i + chunk_size]
-                context_text = " ".join(context_buffer[-15:])
                 
-                translated_chunk = await self._translate_chunk_with_retry(
-                    chunk, target_language, video_title, context_text, chunk_idx, total_chunks, video_summary=video_summary
+                result = await self._translate_chunk_with_retry(
+                    chunk, target_language, video_title, context_segments, chunk_idx, total_chunks, video_summary=video_summary
                 )
-                if translated_chunk:
-                    for seg in translated_chunk:
-                        # Deduplicate against previous context
-                        seg['text'] = self._deduplicate_segment(seg.get('text', ''), context_buffer)
-                        context_buffer.append(seg.get('text', ''))
-                    yield translated_chunk
+                if result:
+                    chunk_res = result["chunk"]
+                    corrections = result["corrections"]
+                    
+                    if corrections:
+                        yield corrections
+                        
+                    for seg in chunk_res:
+                        context_texts = [s.get('text', '') for s in context_segments[-15:]]
+                        seg['text'] = self._deduplicate_segment(seg.get('text', ''), context_texts)
+                        context_segments.append(seg)
+                    yield chunk_res
 
     def _deduplicate_segment(self, current_text: str, context_buffer: List[str]) -> str:
         """
@@ -241,8 +261,10 @@ Coherent Translation:
                 
         return current_text
 
-    async def _translate_chunk_with_retry(self, chunk, target_lang, video_title, context_text, idx, total, max_retries=3, video_summary=""):
+    async def _translate_chunk_with_retry(self, chunk, target_lang, video_title, context_segments, idx, total, max_retries=3, video_summary=""):
         attempt = 0
+        context_text = " ".join([s.get('text', '') for s in context_segments[-15:]])
+        
         while attempt < max_retries:
             provider = self.get_provider(attempt=attempt)
             client = provider["client"]
@@ -290,26 +312,29 @@ Coherent Translation:
                     logger.warning(f"Review translation validation failed for chunk {idx}, using initial...")
                     reviewed_chunk = initial_translated_chunk
 
-                # 3. Coherence Check (Bridge previous context and current chunk)
-                logger.info(f"Checking coherence for chunk {idx}/{total} with {provider['name']}")
+                # 3. Coherence Check (Bridge previous context and current chunk + Back-correction)
+                logger.info(f"Checking coherence and back-corrections for chunk {idx}/{total} with {provider['name']}")
                 coherence_response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system", "content": "You are a coherence expert. Output valid JSON array ONLY."},
-                        {"role": "user", "content": self._build_coherence_prompt(target_lang, video_title, context_text, reviewed_chunk, video_summary=video_summary)}
+                        {"role": "system", "content": "You are a coherence expert. Output valid JSON object with 'current_chunk' and 'corrections' fields."},
+                        {"role": "user", "content": self._build_coherence_prompt(target_lang, video_title, context_segments, reviewed_chunk, video_summary=video_summary)}
                     ],
                     temperature=0.1,
                     timeout=300
                 ))
                 
                 coherence_content = coherence_response.choices[0].message.content.strip()
-                final_chunk = self._parse_json_response(coherence_content)
+                coherence_result = self._parse_json_dict(coherence_content)
                 
+                final_chunk = coherence_result.get("current_chunk", reviewed_chunk)
+                corrections = coherence_result.get("corrections", [])
+
                 if self._validate_translation(chunk, final_chunk, target_lang, coherence_content):
-                    return final_chunk
+                    return {"chunk": final_chunk, "corrections": corrections}
                 
-                # If coherence failed, return reviewed
-                return reviewed_chunk
+                # If coherence failed validation, return reviewed with no corrections
+                return {"chunk": reviewed_chunk, "corrections": []}
                 
             except Exception as e:
                 logger.error(f"Error in translation chunk {idx}: {e}")
@@ -319,6 +344,21 @@ Coherent Translation:
             
         logger.warning(f"Failed to translate chunk {idx} after {max_retries} attempts. Returning original text.")
         return chunk
+
+    def _parse_json_dict(self, content: str) -> Dict:
+        try:
+            clean_content = re.sub(r'```json\s*|```', '', content).strip()
+            if not clean_content.startswith('{'):
+                match = re.search(r'\{.*\}', clean_content, re.DOTALL)
+                if match:
+                    clean_content = match.group(0)
+
+            raw_data = json.loads(clean_content)
+            if isinstance(raw_data, dict):
+                return raw_data
+        except Exception as e:
+            logger.error(f"JSON Parse Error (Dict): {e}. Content preview: {content[:100]}...")
+        return {"current_chunk": [], "corrections": []}
 
     def _parse_json_response(self, content: str) -> List[Dict]:
         try:

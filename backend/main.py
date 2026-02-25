@@ -223,10 +223,24 @@ async def translate_stream_endpoint(request: TranslateRequest, db: Session = Dep
             try:
                 loop = asyncio.get_event_loop()
                 
+                # Prepare context as list of segments for the new service requirement
+                prev_segments = db.query(Segment).filter(
+                    Segment.project_id == request.project_id,
+                    Segment.text_translated != None,
+                    Segment.text_translated != ""
+                ).order_by(Segment.start_time.desc()).limit(15).all()
+                
+                history_segments = [
+                    {"id": s.id, "start": s.start_time, "end": s.end_time, "text": s.text_translated}
+                    for s in reversed(prev_segments)
+                ]
+
                 gen = translator.translate_segments_stream(
                     segments=segments_data,
                     target_language=request.target_language,
-                    history_context=request.context or []
+                    history_segments=history_segments,
+                    video_title=project.video_path.split(os.sep)[-1] if project.video_path else "Unknown",
+                    video_summary=project.video_summary or ""
                 )
 
                 def get_next_chunk():
@@ -249,12 +263,15 @@ async def translate_stream_endpoint(request: TranslateRequest, db: Session = Dep
                     if chunk is None:
                         break
                         
-                    # 及时更新数据库中的翻译结果
+                    # 及时更新数据库中的翻译结果 (handle both chunk results and corrections)
                     for translated_seg in chunk:
                         db_segment = stream_db.query(Segment).filter(Segment.id == translated_seg["id"]).first()
                         if db_segment and "text" in translated_seg:
-                            db_segment.text_translated = translated_seg["text"]
-                            db_segment.tts_audio_path = None
+                            # Update only if changed
+                            if db_segment.text_translated != translated_seg["text"]:
+                                print(f"📝 Updating segment {db_segment.id}: {db_segment.text_translated} -> {translated_seg['text']}")
+                                db_segment.text_translated = translated_seg["text"]
+                                db_segment.tts_audio_path = None
                     stream_db.commit()
                         
                     yield json.dumps(chunk, ensure_ascii=False) + "\n"

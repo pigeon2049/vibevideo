@@ -147,6 +147,13 @@ Example Output:
 Coherent Review:
 """
 
+    def _clean_speaker_label(self, text: str) -> str:
+        if not text:
+            return text
+        import re
+        pattern = r'^(?:\[[^\]]{1,30}\]|\([^)]{1,30}\)|[A-Z][A-Za-z0-9-]*\s?(?:[A-Z0-9][A-Za-z0-9-]*\s?){0,2}|[\u4e00-\u9fa5]{2,5})[:：]\s*'
+        return re.sub(pattern, '', text).strip()
+
     async def translate_segments_stream(
         self, 
         segments: List[Dict], 
@@ -156,6 +163,13 @@ Coherent Review:
         chunk_size: int = 5,
         video_summary: str = ""
     ):
+        for seg in segments:
+            if 'text' in seg:
+                seg['text'] = self._clean_speaker_label(seg['text'])
+        for seg in history_segments:
+            if 'text' in seg:
+                seg['text'] = self._clean_speaker_label(seg['text'])
+
         context_segments = history_segments.copy()
         total_chunks = (len(segments) + chunk_size - 1) // chunk_size
         

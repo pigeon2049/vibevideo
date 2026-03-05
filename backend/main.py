@@ -285,9 +285,58 @@ async def translate_stream_endpoint(request: TranslateRequest, db: Session = Dep
                 
                 if untranslated_count == 0:
                     proj = stream_db.query(Project).filter(Project.id == request.project_id).first()
-                    if proj:
+                    if proj and proj.status != "translated":
+                        print("🚀 Initial translation complete. Starting overall review and timing adjustment...")
+                        proj.status = "reviewing"
+                        stream_db.commit()
+
+                        # Get all translated segments for the project
+                        all_segments = stream_db.query(Segment).filter(
+                            Segment.project_id == request.project_id
+                        ).order_by(Segment.start_time).all()
+
+                        review_segments_data = [
+                            {"id": s.id, "start": s.start_time, "end": s.end_time, "text": s.text_translated}
+                            for s in all_segments
+                        ]
+
+                        overall_gen = translator.overall_translate_review_stream(
+                            segments=review_segments_data,
+                            target_language=request.target_language,
+                            video_title=proj.video_path.split(os.sep)[-1] if proj.video_path else "Unknown",
+                            video_summary=proj.video_summary or "",
+                            chunk_size=30
+                        )
+
+                        async for reviewed_chunk in overall_gen:
+                            if active_translation_streams.get(request.project_id) != stream_id:
+                                print(f"🛑 Stream cancelled during overall review for project {request.project_id}")
+                                break
+                            
+                            for updated_seg in reviewed_chunk:
+                                db_segment = stream_db.query(Segment).filter(Segment.id == updated_seg["id"]).first()
+                                if db_segment:
+                                    changed = False
+                                    if db_segment.text_translated != updated_seg["text"]:
+                                        print(f"✨ [Review] Text updated: {db_segment.text_translated} -> {updated_seg['text']}")
+                                        db_segment.text_translated = updated_seg["text"]
+                                        changed = True
+                                    if abs(db_segment.end_time - updated_seg["end"]) > 0.001:
+                                        print(f"⏱️ [Review] Timing updated for {db_segment.id}: {db_segment.end_time} -> {updated_seg['end']}")
+                                        db_segment.end_time = updated_seg["end"]
+                                        changed = True
+                                    
+                                    if changed:
+                                        db_segment.tts_audio_path = None
+                            
+                            stream_db.commit()
+                            yield json.dumps(reviewed_chunk, ensure_ascii=False) + "\n"
+                            await asyncio.sleep(0.01)
+
+                        # Final status update
                         proj.status = "translated"
                         stream_db.commit()
+                        print("✅ Overall review complete.")
 
             finally:
                 stream_db.close()

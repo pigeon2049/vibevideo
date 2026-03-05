@@ -154,6 +154,239 @@ Coherent Review:
         pattern = r'^(?:\[[^\]]{1,30}\]|\([^)]{1,30}\)|[A-Z][A-Za-z0-9-]*\s?(?:[A-Z0-9][A-Za-z0-9-]*\s?){0,2}|[\u4e00-\u9fa5]{2,5})[:：]\s*'
         return re.sub(pattern, '', text).strip()
 
+    def _postprocess_translation(self, text: str) -> str:
+        if not text:
+            return text
+        # Remove markdown quotes or translation: prefixes
+        if text.startswith('“') and text.endswith('”'):
+            text = text[1:-1]
+        elif text.startswith('"') and text.endswith('"'):
+            text = text[1:-1]
+            
+        if '翻译：' in text or '翻译:"' in text or '翻译：“' in text:
+            text = re.sub(r'^.*?翻译[：:]\s*["“]?(.*?)["”]?\s*$', r'\1', text, flags=re.DOTALL)
+            
+        text = text.replace('...', '，').replace('…', '，')
+        text = text.replace('————', '：').replace('——', '：')
+        return text.strip()
+
+    def _build_overall_review_prompt(self, target_lang: str, video_title: str, segments: List[Dict], video_summary: str = "") -> str:
+        segments_json = json.dumps(segments, ensure_ascii=False)
+        summary_section = f"\nVIDEO CONTEXT/SUMMARY:\n{video_summary}\n" if video_summary else ""
+        return f"""You are a professional video subtitle editor. 
+Video Title: {video_title}{summary_section}
+Target Language: {target_lang}
+
+TASK: Perform a final coherency pass on this block of sequentially translated subtitle segments.
+These segments were translated independently. Your goals are:
+1. CONDENSE wordy or overly literal translations.
+2. REMOVE redundant words or repeated meanings that exist because a sentence was split across two segments. If a meaning is fully expressed in segment 1, remove the trailing half-sentence from segment 2, or vice versa, to make both segments sound natural on their own.
+3. FIX unnatural phrasing.
+
+STRICT REQUIREMENTS:
+1. Maintain the exact same JSON structure. Every ID must remain exactly as it is.
+2. Only modify the "text" field.
+3. Return ONLY the JSON list of updated segments. DO NOT merge segments. Return the exact same number of segments.
+4. If a segment is already perfect and requires no change, return it exactly as it is.
+
+Segments block:
+{segments_json}
+
+Improved Translation:
+"""
+
+    def _build_transcription_correction_prompt(self, video_title: str, segments: List[Dict], video_description: str = "") -> str:
+        segments_json = json.dumps(segments, ensure_ascii=False)
+        description_section = f"\nVIDEO DESCRIPTION:\n{video_description}\n" if video_description else ""
+        return f"""You are a professional subtitle transcript editor. 
+Video Title: {video_title}{description_section}
+
+TASK: Review the following transcribed subtitle segments and correct any speech recognition errors (like homophones or misspelled names) using the video context. 
+ALSO, you MUST completely remove any speaker labels (e.g., "John:", "[Speaker 1]:", "(Male voice)") from the text.
+
+STRICT REQUIREMENTS:
+1. Maintain the exact same JSON structure. Every ID must remain exactly as it is.
+2. Only modify the "text" field to correct errors and remove speaker labels. Keep the original language (do NOT translate).
+3. Return ONLY the JSON list of updated segments. DO NOT merge segments. Return the exact same number of segments.
+4. If a segment is perfectly correct and has no speaker labels, return it exactly as it is.
+
+Segments to correct:
+{segments_json}
+
+Corrected Transcripts:
+"""
+
+    def _adjust_segment_timing(self, current_seg: Dict, next_seg: Optional[Dict], target_lang: str):
+        """
+        Extends the 'end' time of current_seg if the text is too long for its duration,
+        provided there is empty space before the next segment.
+        """
+        if not current_seg or 'text' not in current_seg:
+            return
+
+        text = current_seg['text']
+        start = current_seg['start']
+        end = current_seg['end']
+        duration = end - start
+
+        if duration <= 0:
+            return
+
+        # Simple heuristic for reading speed limits (characters/words per second)
+        is_chinese = any('\u4e00' <= c <= '\u9fff' for c in text)
+        limit_cps = 5.0 if is_chinese else 15.0 # chars per sec for zh, approx "chars" (inc spaces) for en
+        
+        actual_cps = len(text) / duration
+
+        # If it's too fast, we want to extend the end time, up to the next segment's start time
+        if actual_cps > limit_cps:
+            desired_duration = len(text) / limit_cps
+            ideal_end = start + desired_duration
+
+            # Determine the maximum allowed end time
+            max_end = next_seg['start'] if next_seg else ideal_end + 5.0 # buffer for the last segment
+
+            # Expand end time, but leave a small 0.1s gap if it hits the next segment
+            new_end = min(ideal_end, max_end - 0.1)
+            
+            if new_end > end:
+                logger.info(f"Adjusting timing for {current_seg['id']}: {end:.2f} -> {new_end:.2f} (Speed: {actual_cps:.1f} cps)")
+                current_seg['end'] = round(new_end, 3)
+
+    async def overall_translate_review_stream(
+        self,
+        segments: List[Dict],
+        target_language: str,
+        video_title: str = "Unknown Video",
+        video_summary: str = "",
+        chunk_size: int = 30
+    ):
+        """
+        A final review pass over the translated segments.
+        Processes in larger chunks, fixes redundancies, and adjusts timings.
+        """
+        total_chunks = (len(segments) + chunk_size - 1) // chunk_size
+        logger.info(f"Starting Final Overall Review: {len(segments)} segments in {total_chunks} chunks.")
+
+        for i in range(0, len(segments), chunk_size):
+            chunk_idx = i // chunk_size + 1
+            chunk = segments[i : i + chunk_size]
+            next_seg_start = segments[i + chunk_size]['start'] if i + chunk_size < len(segments) else None
+            
+            # Use original translation if review fails
+            final_chunk = chunk 
+            
+            # Send to LLM for review
+            attempt = 0
+            while attempt < 3:
+                provider = self.get_provider(attempt=attempt)
+                client = provider["client"]
+                model = provider["model"]
+                
+                logger.info(f"Final Review chunk {chunk_idx}/{total_chunks} with {provider['name']} (attempt {attempt+1})")
+                try:
+                    loop = asyncio.get_running_loop()
+                    response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a professional subtitle editor. Output valid JSON array ONLY."},
+                            {"role": "user", "content": self._build_overall_review_prompt(target_language, video_title, chunk, video_summary=video_summary)}
+                        ],
+                        temperature=0.2,
+                        timeout=300
+                    ))
+                    
+                    content = response.choices[0].message.content.strip()
+                    reviewed_chunk = self._parse_json_response(content)
+                    
+                    if self._validate_translation(chunk, reviewed_chunk, target_language, content):
+                        final_chunk = reviewed_chunk
+                        break
+                    else:
+                        logger.warning(f"Final review validation failed for chunk {chunk_idx}, retry...")
+                except Exception as e:
+                    logger.error(f"Error in final review chunk {chunk_idx}: {e}")
+                
+                attempt += 1
+                await asyncio.sleep(2)
+            
+            # Adjust timings for each segment in the chunk
+            for j, seg in enumerate(final_chunk):
+                # We need the next segment to determine the gap
+                next_seg_in_chunk = final_chunk[j+1] if j + 1 < len(final_chunk) else None
+                # If it's the last segment in the chunk, use the first segment of the next chunk
+                if not next_seg_in_chunk and next_seg_start is not None:
+                    next_seg_in_chunk = {'start': next_seg_start}
+                
+                if 'text' in seg:
+                    seg['text'] = self._postprocess_translation(seg.get('text', ''))
+                self._adjust_segment_timing(seg, next_seg_in_chunk, target_language)
+            
+            yield final_chunk
+
+    async def correct_transcription_segments(
+        self,
+        segments: List[Dict],
+        video_title: str = "Unknown Video",
+        video_description: str = "",
+        chunk_size: int = 30
+    ) -> List[Dict]:
+        """
+        A synchronous correction pass over the transcribed segments to fix words and remove speaker labels.
+        """
+        total_chunks = (len(segments) + chunk_size - 1) // chunk_size
+        logger.info(f"Starting Transcription Correction: {len(segments)} segments in {total_chunks} chunks.")
+        
+        corrected_segments = []
+
+        for i in range(0, len(segments), chunk_size):
+            chunk_idx = i // chunk_size + 1
+            chunk = segments[i : i + chunk_size]
+            
+            final_chunk = chunk 
+            
+            attempt = 0
+            while attempt < 3:
+                provider = self.get_provider(attempt=attempt)
+                client = provider["client"]
+                model = provider["model"]
+                
+                logger.info(f"Correction chunk {chunk_idx}/{total_chunks} with {provider['name']} (attempt {attempt+1})")
+                try:
+                    loop = asyncio.get_running_loop()
+                    prompt = self._build_transcription_correction_prompt(video_title, chunk, video_description=video_description)
+                    response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a professional transcript editor. Output valid JSON array ONLY."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.2,
+                        timeout=300
+                    ))
+                    
+                    content = response.choices[0].message.content.strip()
+                    reviewed_chunk = self._parse_json_response(content)
+                    
+                    if len(reviewed_chunk) == len(chunk):
+                        # Clean labels as a fallback
+                        for seg in reviewed_chunk:
+                            if 'text' in seg:
+                                seg['text'] = self._clean_speaker_label(seg['text'])
+                        final_chunk = reviewed_chunk
+                        break
+                    else:
+                        logger.warning(f"Correction validation failed for chunk {chunk_idx}: size mismatch, retry...")
+                except Exception as e:
+                    logger.error(f"Error in correction chunk {chunk_idx}: {e}")
+                
+                attempt += 1
+                await asyncio.sleep(2)
+            
+            corrected_segments.extend(final_chunk)
+            
+        return corrected_segments
+
     async def translate_segments_stream(
         self, 
         segments: List[Dict], 
@@ -215,6 +448,7 @@ Coherent Review:
                         # Deduplicate against previous context
                         context_texts = [s.get('text', '') for s in context_segments[-15:]]
                         seg['text'] = self._deduplicate_segment(seg.get('text', ''), context_texts)
+                        seg['text'] = self._postprocess_translation(seg.get('text', ''))
                         context_segments.append(seg)
                     yield chunk_res
                     next_expected_idx += 1
@@ -237,6 +471,7 @@ Coherent Review:
                     for seg in chunk_res:
                         context_texts = [s.get('text', '') for s in context_segments[-15:]]
                         seg['text'] = self._deduplicate_segment(seg.get('text', ''), context_texts)
+                        seg['text'] = self._postprocess_translation(seg.get('text', ''))
                         context_segments.append(seg)
                     yield chunk_res
 

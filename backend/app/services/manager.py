@@ -52,6 +52,20 @@ class ProjectManager:
         try:
             segments = await transcription_service.transcribe(audio_path, resume_start=resume_start)
             logger.info(f"Transcription completed for project {project_id}, segments found: {len(segments)}")
+            
+            if segments:
+                # Apply LLM correction synchronously
+                video_title = os.path.basename(project.video_path) if project.video_path else "Unknown"
+                video_description = project.video_description or ""
+                
+                logger.info(f"Starting LLM correction on transcribed segments for project {project_id}...")
+                segments = await translation_service.correct_transcription_segments(
+                    segments=segments,
+                    video_title=video_title,
+                    video_description=video_description
+                )
+                logger.info(f"LLM correction completed for project {project_id}.")
+
         except Exception as e:
             logger.error(f"Error during transcription call in manager: {e}")
             import traceback
@@ -249,13 +263,16 @@ class ProjectManager:
         yield {"step": "merge"}
         logger.info("Starting audio processing: merge")
         
-        # Generate SRT (simple implementation)
-        # Using segments_data which has the translated texts
+        # Generate SRT with paragraph-level character timing proportion
         srt_content = ""
-        for i, s in enumerate(segments_data):
-            start_str = self._format_timestamp(s["start"])
-            end_str = self._format_timestamp(s["end"])
-            srt_content += f"{i+1}\n{start_str} --> {end_str}\n{s['text']}\n\n"
+        index = 1
+        for para in paragraphs_with_audio:
+            sub_segments = self._split_paragraph_to_subtitles(para)
+            for s in sub_segments:
+                start_str = self._format_timestamp(s["start"])
+                end_str = self._format_timestamp(s["end"])
+                srt_content += f"{index}\n{start_str} --> {end_str}\n{s['text']}\n\n"
+                index += 1
         
         srt_path = settings.TEMP_DIR / f"{project_id}.srt"
         srt_path.write_text(srt_content, encoding="utf-8")
@@ -292,5 +309,65 @@ class ProjectManager:
         secs = int(seconds % 60)
         millis = int((seconds % 1) * 1000)
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+    def _split_paragraph_to_subtitles(self, paragraph: Dict, max_line_char=30) -> List[Dict]:
+        punctuations = ['，', '；', '：', '。', '？', '！', '\n', '”', ',', '.', '?', '!']
+        def is_punctuation(char):
+            return char in punctuations
+            
+        text = paragraph.get("text", "")
+        start = paragraph.get("start", 0.0)
+        end = paragraph.get("end", 0.0)
+        
+        if not text:
+            return []
+            
+        output_data = []
+        sentence_start = 0
+        duration_per_char = (end - start) / len(text)
+        
+        for i, char in enumerate(text):
+            if not is_punctuation(char) and i != len(text) - 1:
+                continue
+            if i - sentence_start < 5 and i != len(text) - 1:
+                continue
+            if i < len(text) - 1 and is_punctuation(text[i+1]):
+                continue
+                
+            sentence = text[sentence_start:i+1].strip()
+            if not sentence:
+                sentence_start = i + 1
+                continue
+                
+            sentence_end = start + duration_per_char * len(text[sentence_start:i+1])
+            
+            # Sub-split if too long
+            if len(sentence) > max_line_char:
+                num_chunks = (len(sentence) + max_line_char - 1) // max_line_char
+                chunk_len = (len(sentence) + num_chunks - 1) // num_chunks
+                
+                sub_start = start
+                for j in range(num_chunks):
+                    sub_sentence = sentence[j*chunk_len:(j+1)*chunk_len]
+                    if not sub_sentence:
+                        continue
+                    sub_end = sub_start + duration_per_char * len(sub_sentence)
+                    output_data.append({
+                        "start": round(sub_start, 3),
+                        "end": round(sub_end, 3),
+                        "text": sub_sentence
+                    })
+                    sub_start = sub_end
+            else:
+                output_data.append({
+                    "start": round(start, 3),
+                    "end": round(sentence_end, 3),
+                    "text": sentence
+                })
+                
+            start = sentence_end
+            sentence_start = i + 1
+            
+        return output_data
 
 project_manager = ProjectManager()

@@ -30,9 +30,12 @@ cd vibevideo
 
 ### 3. 安装外部工具 (Windows)
 请将以下工具下载并将解压后的exe文件放置在 `backend\bin` 目录下：
-- **yt-dlp**: [下载链接](https://github.com/yt-dlp/yt-dlp/releases/download/2026.02.04/yt-dlp.exe)
+- **yt-dlp**: [下载链接](https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.03/yt-dlp.exe)
 - **FFmpeg**: [下载链接](https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-full_build.7z) 
-- **Deno**: [下载链接](https://github.com/denoland/deno/releases/download/v2.6.9/deno-x86_64-pc-windows-msvc.zip)
+- **Deno**: [下载链接](https://github.com/denoland/deno/releases/download/v2.7.3/deno-x86_64-pc-windows-msvc.zip)
+
+如果出现了n challenge solving failed
+请更新yt-dlp及deno到最新版本
 
 ### 4. 下载模型
 将以下模型文件放入 `models/` 目录下：
